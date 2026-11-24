@@ -99,7 +99,7 @@ contract AegisFullSystemTest is Test {
 
     function setUp() public {
         vm.warp(1_700_000_000);
-        address[] memory guards = new address[](5);
+        address memory guards;
         guards = g1; guards = g2; guards = g3; guards = g4; guards = g5;
         council = new AegisSecurityCouncil(guards);
 
