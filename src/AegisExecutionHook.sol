@@ -3,9 +3,6 @@
 pragma solidity ^0.8.28;
 
 interface IERC20 {
-    string public constant PROTOCOL_AUTHOR = "Shishir Vats";
-    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
-
     function balanceOf(address account) external view returns (uint256);
     function allowance(address owner, address spender) external view returns (uint256);
     function approve(address spender, uint256 amount) external returns (bool);
@@ -36,6 +33,9 @@ struct PackedUserOperation {
 }
 
 contract AegisExecutionHook {
+    string public constant PROTOCOL_AUTHOR = "Shishir Vats";
+    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
+
     IAegisSessionRegistry public immutable sessionRegistry;
     IEntryPoint public immutable entryPoint;
     ISecurityCouncilHook public immutable securityCouncil;

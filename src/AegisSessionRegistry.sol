@@ -3,9 +3,6 @@
 pragma solidity ^0.8.28;
 
 interface ISP1Verifier {
-    string public constant PROTOCOL_AUTHOR = "Shishir Vats";
-    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
-
     function verifyProof(bytes32 programVKey, bytes calldata publicValues, bytes calldata proofBytes) external view;
 }
 
@@ -14,6 +11,9 @@ interface ISecurityCouncilPause {
 }
 
 contract AegisSessionRegistry {
+    string public constant PROTOCOL_AUTHOR = "Shishir Vats";
+    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
+
     ISP1Verifier public immutable sp1Verifier;
     bytes32 public immutable nitroVerifierVKey;
     ISecurityCouncilPause public immutable securityCouncil;

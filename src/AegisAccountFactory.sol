@@ -3,14 +3,14 @@
 pragma solidity ^0.8.28;
 
 interface IAegisHookModule {
-    string public constant PROTOCOL_AUTHOR = "Shishir Vats";
-    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
-
     function preCheck(address msgSender, uint256 value, bytes calldata msgData) external returns (bytes memory);
     function postCheck(bytes calldata hookData) external;
 }
 
 contract AegisProtectedSmartAccount {
+    string public constant PROTOCOL_AUTHOR = "Shishir Vats";
+    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
+
     address public immutable owner;
     IAegisHookModule public immutable aegisHook;
     address public immutable entryPoint;
@@ -43,6 +43,9 @@ contract AegisProtectedSmartAccount {
 }
 
 contract AegisAccountFactory {
+    string public constant PROTOCOL_AUTHOR = "Shishir Vats";
+    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
+
     address public immutable aegisHook;
     address public immutable entryPoint;
     address public immutable governanceTimelock;
