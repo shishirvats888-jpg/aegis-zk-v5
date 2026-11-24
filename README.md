@@ -1,3 +1,5 @@
+> **Created & Architected by Shishir Vats** | Zero-Trust Execution Firewall & Parametric Underwriting for AI Agents
+
 # AEGIS-ZK (v5.2 Zero-Trust Edition)
 **Cryptographic Execution Guardrail & Parametric Underwriting Protocol for Autonomous AI Agents**
 

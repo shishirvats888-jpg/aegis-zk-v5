@@ -1,3 +1,4 @@
+// Created & Architected by Shishir Vats | AEGIS-ZK Enclave Policy Signer
 import { createPublicClient, http, encodeAbiParameters, keccak256, parseUnits } from 'viem';
 import { privateKeyToAccount, generatePrivateKey } from 'viem/accounts';
 import { baseSepolia } from 'viem/chains';

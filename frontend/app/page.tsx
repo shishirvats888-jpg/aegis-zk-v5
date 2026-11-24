@@ -30,7 +30,7 @@ export default function AegisBreakTheAgent() {
 
   return (
     <main style={{ maxWidth: 820, margin: '40px auto', fontFamily: 'monospace', padding: 24, background: '#0b0f19', color: '#e2e8f0', borderRadius: 12 }}>
-      <h1 style={{ color: '#38bdf8' }}>AEGIS-ZK (v5.2) — "Break The Agent" Live Sandbox</h1>
+      <h1 style={{ color: '#38bdf8' }}>AEGIS-ZK (v5.2) — Created by Shishir Vats</h1>
       <p>Test adversarial prompt injections against our ERC-7579 + AWS Nitro + Succinct SP1 firewall.</p>
       <textarea
         rows={3}

@@ -1,3 +1,4 @@
+// Created & Architected by Shishir Vats | AEGIS-ZK SP1 Nitro Verifier
 #![no_main]
 sp1_zkvm::entrypoint!(main);
 

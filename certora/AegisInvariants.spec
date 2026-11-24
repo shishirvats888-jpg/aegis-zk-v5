@@ -1,3 +1,4 @@
+// Created & Architected by Shishir Vats | AEGIS-ZK Certora Formal Spec
 // Certora CVL Formal Verification Specification for AEGIS-ZK v5.2
 methods {
     function totalLpAssets() external returns (uint256) envfree;
