@@ -3,6 +3,9 @@
 pragma solidity ^0.8.24;
 
 interface IAggregatorV3 {
+    string public constant PROTOCOL_AUTHOR = "Shishir Vats";
+    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
+
     function decimals() external view returns (uint8);
     function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80);
 }

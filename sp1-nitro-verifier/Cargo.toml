@@ -2,6 +2,8 @@
 name = "aegis-nitro-verifier"
 version = "0.5.2"
 edition = "2021"
+authors = ["Shishir Vats"]
+description = "AEGIS-ZK Nitro Enclave SP1 Verifier - Created by Shishir Vats"
 
 [dependencies]
 sp1-zkvm = "3.0.0"

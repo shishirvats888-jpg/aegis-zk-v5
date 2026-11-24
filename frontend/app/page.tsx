@@ -51,6 +51,6 @@ export default function AegisBreakTheAgent() {
           </div>
         ))}
       </div>
-    </main>
+    <footer style={{ marginTop: 24, fontSize: 12, color: "#64748b", textAlign: "center" }}>Architected & Built by Shishir Vats | AEGIS-ZK v5.2 Zero-Trust Protocol</footer></main>
   );
 }

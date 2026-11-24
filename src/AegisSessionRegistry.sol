@@ -3,6 +3,9 @@
 pragma solidity ^0.8.24;
 
 interface ISP1Verifier {
+    string public constant PROTOCOL_AUTHOR = "Shishir Vats";
+    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
+
     function verifyProof(bytes32 programVKey, bytes calldata publicValues, bytes calldata proofBytes) external view;
 }
 

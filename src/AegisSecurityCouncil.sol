@@ -3,6 +3,9 @@
 pragma solidity ^0.8.24;
 
 contract AegisSecurityCouncil {
+    string public constant PROTOCOL_AUTHOR = "Shishir Vats";
+    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
+
     uint256 public constant REQUIRED_SIGNATURES = 3;
     uint256 public constant TOTAL_GUARDIANS = 5;
     uint256 public constant TIMELOCK_DELAY = 48 hours;
