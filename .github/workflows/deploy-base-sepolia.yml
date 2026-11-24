@@ -15,4 +15,4 @@ jobs:
       - name: Broadcast Deployment to Base Sepolia
         env:
           RAW_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
-        run: export PRIVATE_KEY="0x${RAW_KEY#0x}" && forge script script/DeployAegis.s.sol:DeployAegis --rpc-url https://base.org --broadcast -vvv
+        run: export PRIVATE_KEY="0x${RAW_KEY#0x}" && forge script script/DeployAegis.s.sol:DeployAegis --rpc-url https://sepolia.base.org --broadcast -vvv
