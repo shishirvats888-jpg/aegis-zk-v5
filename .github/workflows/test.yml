@@ -1,0 +1,19 @@
+name: Aegis-ZK v5.2 Zero-Trust Security CI
+on: [push, pull_request]
+jobs:
+  foundry-and-slither:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Install forge-std
+        run: forge install foundry-rs/forge-std --no-commit
+      - name: Run Foundry Unit & 10,000-Run Fuzz Tests
+        run: forge test --fuzz-runs 10000 -vvv
+      - name: Run Trail of Bits Slither Static Analysis
+        uses: crytic/slither-action@v0.4.0
+        with:
+          fail-on: high

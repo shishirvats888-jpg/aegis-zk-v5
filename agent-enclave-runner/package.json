@@ -1,0 +1,7 @@
+{
+  "name": "aegis-enclave-runner",
+  "version": "5.2.0",
+  "scripts": { "start": "npx tsx index.ts" },
+  "dependencies": { "viem": "^2.21.0" },
+  "devDependencies": { "tsx": "^4.19.0", "typescript": "^5.6.0" }
+}

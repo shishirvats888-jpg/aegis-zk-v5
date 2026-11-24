@@ -1,0 +1,9 @@
+[package]
+name = "aegis-nitro-verifier"
+version = "0.5.2"
+edition = "2021"
+
+[dependencies]
+sp1-zkvm = "3.0.0"
+ciborium = "0.2.2"
+sha2 = "0.10.8"
