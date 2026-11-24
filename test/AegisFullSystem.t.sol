@@ -116,7 +116,7 @@ contract AegisFullSystemTest is Test {
         registry = new AegisSessionRegistry(address(sp1), VKEY, APPROVED_PCR0, address(council), address(council));
 
         address[] memory tokens = new address[](1);
-        tokens = address(usdt);
+        tokens[0] = address(usdt);
         hook = new AegisExecutionHook(address(registry), address(entryPoint), address(council), paymaster, address(council), 100 gwei, tokens);
         factory = new AegisAccountFactory(address(hook), address(entryPoint), address(council), treasury, 0.01 ether);
         vault = new AegisUnderwritingVault(address(usdt), address(council), address(council));
@@ -173,7 +173,7 @@ contract AegisFullSystemTest is Test {
         uint256[] memory maxOut = new uint256[](1);
         maxOut = 10_000e6;
         address[] memory spenders = new address[](1);
-        spenders = attacker;
+        spenders[0] = attacker;
         bytes memory hookMsg = abi.encode(bytes32(bytes1(0x00)), abi.encodePacked(address(usdt), uint256(0), bytes("")), block.number + 2, uint256(0), maxOut, spenders);
 
         // Attempt to spend $6,000 USDT -> exceeds $5,000 daily velocity cap even with valid signature!

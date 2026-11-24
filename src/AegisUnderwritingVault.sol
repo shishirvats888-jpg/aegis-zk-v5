@@ -111,7 +111,7 @@ contract AegisUnderwritingVault {
 
         currentEpoch = 1;
         currentEpochStart = block.timestamp;
-        epochs = EpochInfo(block.timestamp, block.timestamp + EPOCH_DURATION, 0, 0, 0, 0, false);
+        epochs[1] = EpochInfo(block.timestamp, block.timestamp + EPOCH_DURATION, 0, 0, 0, 0, false);
     }
 
     function depositLp(uint256 assets) external whenNotPaused returns (uint256 shares) {

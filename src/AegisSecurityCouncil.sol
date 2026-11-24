@@ -11,7 +11,7 @@ contract AegisSecurityCouncil {
     uint256 public constant TIMELOCK_DELAY = 48 hours;
 
     mapping(address => bool) public isGuardian;
-    address public guardians;
+    address[5] public guardians;
     bool public globalPaused;
     uint256 public pausedAt;
 
@@ -49,7 +49,7 @@ contract AegisSecurityCouncil {
         _;
     }
 
-    constructor(address memory _guardians) {
+    constructor(address[5] memory _guardians) {
         for (uint256 i = 0; i < TOTAL_GUARDIANS; i++) {
             address g = _guardians[i];
             if (g == address(0) || isGuardian[g]) revert AegisInvalidGuardianSet();
