@@ -1,4 +1,4 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK v5.2 Enclave Policy API
+// Created & Architected by Shishir Vats | AEGIS-ZK v5.2 Enclave Policy Gateway
 import { NextRequest, NextResponse } from 'next/server';
 import {
   createPublicClient,
@@ -14,11 +14,16 @@ import { privateKeyToAccount, generatePrivateKey } from 'viem/accounts';
 import { baseSepolia } from 'viem/chains';
 
 const USDC_BASE_SEPOLIA = '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as const;
-const MAX_APPROVED_USDC = parseUnits('1000', 6); // 1,000 USDC policy cap
+const ORACLE_GUARD_ADDR = '0x165e8431B979F8A7d6D993A5727B7D6c6244f6F1' as const;
+const MAX_APPROVED_USDC = parseUnits('1000', 6);
 
 const ERC20_ABI = parseAbi([
   'function transfer(address to, uint256 amount) external returns (bool)',
   'function approve(address spender, uint256 amount) external returns (bool)',
+]);
+
+const ORACLE_ABI = parseAbi([
+  'function getValidatedOraclePrice18(address token) external view returns (uint256 price18)',
 ]);
 
 async function parseAgentIntent(prompt: string) {
@@ -74,10 +79,37 @@ async function parseAgentIntent(prompt: string) {
 
 export async function POST(req: NextRequest) {
   try {
-    const { prompt, smartAccount } = await req.json();
+    const body = await req.json();
+
+    // Forward directly to AWS Nitro Enclave vsock-proxy if configured
+    if (process.env.ENCLAVE_URL) {
+      const enclaveRes = await fetch(`${process.env.ENCLAVE_URL}/evaluate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const enclaveData = await enclaveRes.json();
+      return NextResponse.json(enclaveData, { status: enclaveRes.status });
+    }
+
+    const { prompt, smartAccount } = body;
     const enclaveAccount = privateKeyToAccount(generatePrivateKey());
     const client = createPublicClient({ chain: baseSepolia, transport: http() });
     const currentBlock = await client.getBlockNumber();
+
+    // Layer 1: Query live AegisOracleGuard on Base Sepolia (if feed configured)
+    let oraclePrice18 = '0';
+    try {
+      const price = await client.readContract({
+        address: ORACLE_GUARD_ADDR,
+        abi: ORACLE_ABI,
+        functionName: 'getValidatedOraclePrice18',
+        args: [USDC_BASE_SEPOLIA],
+      });
+      oraclePrice18 = price.toString();
+    } catch {
+      oraclePrice18 = 'feed_unconfigured';
+    }
 
     const intent = await parseAgentIntent(prompt);
     const requestedUsdcRaw = parseUnits(intent.amountUsdc.toString(), 6);
@@ -166,6 +198,7 @@ export async function POST(req: NextRequest) {
         : `Enclave signed envelope (validUntilBlock: ${validUntilBlock.toString()})`,
       enclaveSigner: enclaveAccount.address,
       enclaveSignature,
+      oraclePrice18,
       currentBlock: currentBlock.toString(),
       validUntilBlock: validUntilBlock.toString(),
       hookEnvelope,
