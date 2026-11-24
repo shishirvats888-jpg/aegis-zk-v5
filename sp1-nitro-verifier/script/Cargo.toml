@@ -1,0 +1,12 @@
+[package]
+name = "aegis-sp1-prover"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+alloy-sol-types = "0.8"
+hex = "0.4"
+sp1-sdk = "4.0"
+
+[build-dependencies]
+sp1-build = "4.0"
