@@ -14,6 +14,7 @@
 
 ### Live Deployment (Base Sepolia Testnet — Chain ID `84532`)
 * **Live Interactive Demo:** [https://vercel.app](https://vercel.app)
+* **3-Minute Live Video Walkthrough:** [Watch Demo Video](https://www.youtube.com/watch?v=_loYx0o4eVw)
 * **Author & Architect:** Shishir Vats (Verified on-chain via `PROTOCOL_AUTHOR()`)
 
 | Smart Contract | Live Base Sepolia Address | Explorer |
