@@ -162,7 +162,7 @@ contract AegisFullSystemTest is Test {
         bytes memory outer = abi.encode(mode, abi.encodePacked(address(drainer), uint256(0), bytes("")), block.number + 2, uint256(0), maxOut, spenders);
 
         vm.prank(owner);
-        AegisProtectedSmartAccount epAcc = new AegisProtectedSmartAccount(owner, address(hook), address(drainer)); vm.prank(owner); vm.expectRevert(AegisExecutionHook.AegisNestedExecutionForbidden.selector); epAcc.executeGuarded(outer, address(drainer), 0, abi.encodeWithSelector(MaliciousDrainer.attemptReentrancy.selector, account, inner));
+        AegisProtectedSmartAccount epAcc = new AegisProtectedSmartAccount(owner, address(hook), address(drainer)); vm.prank(owner); vm.expectRevert(AegisExecutionHook.AegisNestedExecutionForbidden.selector); epAcc.executeGuarded(outer, address(drainer), 0, abi.encodeWithSelector(MaliciousDrainer.attemptReentrancy.selector, epAcc, inner));
     }
 
     function test_4_BlocksInfiniteApprovalAnd24hVelocityBreach() public {
