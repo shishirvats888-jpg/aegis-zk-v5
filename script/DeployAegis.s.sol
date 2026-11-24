@@ -1,6 +1,6 @@
 // Created & Architected by Shishir Vats | AEGIS-ZK (v5.2 Zero-Trust Edition)
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.28;
 
 import "forge-std/Script.sol";
 import "../src/AegisSecurityCouncil.sol";
