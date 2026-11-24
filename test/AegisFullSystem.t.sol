@@ -99,8 +99,8 @@ contract AegisFullSystemTest is Test {
 
     function setUp() public {
         vm.warp(1_700_000_000);
-        address memory guards;
-        guards = g1; guards = g2; guards = g3; guards = g4; guards = g5;
+        address[5] memory guards;
+        guards[0] = g1; guards[1] = g2; guards[2] = g3; guards[3] = g4; guards[4] = g5;
         council = new AegisSecurityCouncil(guards);
 
         usdt = new MockUSDT();
@@ -171,7 +171,7 @@ contract AegisFullSystemTest is Test {
         hook.setDailyOutflowCap(address(account), address(usdt), 5_000e6); // $5k daily limit
 
         uint256[] memory maxOut = new uint256[](1);
-        maxOut = 10_000e6;
+        maxOut[0] = 10_000e6;
         address[] memory spenders = new address[](1);
         spenders[0] = attacker;
         bytes memory hookMsg = abi.encode(bytes32(bytes1(0x00)), abi.encodePacked(address(usdt), uint256(0), bytes("")), block.number + 2, uint256(0), maxOut, spenders);
