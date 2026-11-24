@@ -2,5 +2,15 @@
   "name": "aegis-zk-frontend",
   "version": "5.2.0",
   "scripts": { "dev": "next dev", "build": "next build" },
-  "dependencies": { "next": "^14.2.0", "react": "^18.3.0", "react-dom": "^18.3.0", "viem": "^2.21.0" }
+  "dependencies": {
+    "next": "^14.2.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/react": "^18.3.0",
+    "@types/node": "^20.14.0"
+  }
 }
