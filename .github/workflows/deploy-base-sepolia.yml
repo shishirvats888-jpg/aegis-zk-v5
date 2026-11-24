@@ -14,5 +14,5 @@ jobs:
         run: forge install foundry-rs/forge-std --no-commit
       - name: Broadcast Deployment to Base Sepolia
         env:
-          PRIVATE_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
-        run: forge script script/DeployAegis.s.sol:DeployAegis --rpc-url https://base.org --broadcast -vvv
+          RAW_KEY: ${{ secrets.DEPLOYER_PRIVATE_KEY }}
+        run: export PRIVATE_KEY="0x${RAW_KEY#0x}" && forge script script/DeployAegis.s.sol:DeployAegis --rpc-url https://base.org --broadcast -vvv
