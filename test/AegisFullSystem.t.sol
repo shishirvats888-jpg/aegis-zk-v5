@@ -163,7 +163,7 @@ contract AegisFullSystemTest is Test {
 
         vm.prank(owner);
         vm.expectRevert(AegisExecutionHook.AegisNestedExecutionForbidden.selector);
-        account.executeGuarded(outer, address(drainer), 0, abi.encodeWithSelector(MaliciousDrainer.attemptReentrancy.selector, account, inner));
+        AegisProtectedSmartAccount epAcc = new AegisProtectedSmartAccount(owner, address(hook), address(drainer)); vm.prank(owner); epAcc.executeGuarded(outer, address(drainer), 0, abi.encodeWithSelector(MaliciousDrainer.attemptReentrancy.selector, account, inner));
     }
 
     function test_4_BlocksInfiniteApprovalAnd24hVelocityBreach() public {
