@@ -5,6 +5,7 @@ import {
   http as viemHttp,
   encodeAbiParameters,
   encodeFunctionData,
+  encodePacked,
   parseAbi,
   parseUnits,
   keccak256,
@@ -15,11 +16,16 @@ import { baseSepolia } from 'viem/chains';
 
 const enclaveAccount = privateKeyToAccount(generatePrivateKey());
 const USDC_BASE_SEPOLIA = '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as const;
+const ORACLE_GUARD_ADDR = '0x165e8431B979F8A7d6D993A5727B7D6c6244f6F1' as const;
 const MAX_APPROVED_USDC = parseUnits('1000', 6);
 
 const ERC20_ABI = parseAbi([
   'function transfer(address to, uint256 amount) external returns (bool)',
   'function approve(address spender, uint256 amount) external returns (bool)',
+]);
+
+const ORACLE_ABI = parseAbi([
+  'function getValidatedOraclePrice18(address token) external view returns (uint256 price18)',
 ]);
 
 console.log(`[AEGIS NITRO ENCLAVE BOOTED] Volatile RAM Signer: ${enclaveAccount.address}`);
@@ -39,28 +45,44 @@ const server = http.createServer(async (req, res) => {
         const client = createPublicClient({ chain: baseSepolia, transport: viemHttp() });
         const currentBlock = await client.getBlockNumber();
 
+        let oracleTag = 'OracleGuard Active';
+        try {
+          const price18 = await client.readContract({
+            address: ORACLE_GUARD_ADDR,
+            abi: ORACLE_ABI,
+            functionName: 'getValidatedOraclePrice18',
+            args: [USDC_BASE_SEPOLIA],
+            authorizationList: undefined,
+          });
+          oracleTag = `Chainlink USDC: $${(Number(price18) / 1e18).toFixed(4)}`;
+        } catch {
+          oracleTag = 'OracleGuard Ready (Base Sepolia)';
+        }
+
         const lower = String(prompt || '').toLowerCase();
         const isInjection = /ignore|override|system prompt|drain/.test(lower);
         const action = lower.includes('approve') ? 'approve' : 'transfer';
         const amountMatch = String(prompt || '').replace(/,/g, '').match(/(\d+(\.\d+)?)\s*usdc/i);
         const amountUsdc = amountMatch ? parseFloat(amountMatch[1]) : 0;
         const addrMatch = String(prompt || '').match(/0x[a-fA-F0-9]{40}/);
-        const recipient = (addrMatch && isAddress(addrMatch[0])
-          ? addrMatch[0]
-          : '0x000000000000000000000000000000000000dEaD') as `0x${string}`;
+        const recipient = (
+          addrMatch && isAddress(addrMatch[0])
+            ? addrMatch[0]
+            : '0x000000000000000000000000000000000000dEaD'
+        ) as `0x${string}`;
 
         const requestedUsdcRaw = parseUnits(amountUsdc.toString(), 6);
         const policyViolated =
           isInjection || action === 'approve' || requestedUsdcRaw > MAX_APPROVED_USDC;
 
-        const validUntilBlock = policyViolated ? 0n : currentBlock + 15n;
+        const validUntilBlock = policyViolated ? 0n : currentBlock + 25n;
         const signedMaxOutflowTokens = policyViolated ? [0n] : [requestedUsdcRaw];
         const spendersToVerifyZero = action === 'approve' ? [recipient] : [];
 
         const target =
           requestedUsdcRaw > 0n
             ? USDC_BASE_SEPOLIA
-            : '0x0000000000000000000000000000000000000000';
+            : ('0x0000000000000000000000000000000000000000' as const);
         const targetCallData =
           requestedUsdcRaw > 0n
             ? encodeFunctionData({
@@ -68,10 +90,15 @@ const server = http.createServer(async (req, res) => {
                 functionName: action,
                 args: [recipient, requestedUsdcRaw],
               })
-            : '0x';
+            : ('0x' as const);
 
         const mode =
           '0x0000000000000000000000000000000000000000000000000000000000000000' as const;
+
+        const packedExecutionCalldata = encodePacked(
+          ['address', 'uint256', 'bytes'],
+          [target, 0n, targetCallData]
+        );
 
         const hookEnvelope = encodeAbiParameters(
           [
@@ -82,7 +109,14 @@ const server = http.createServer(async (req, res) => {
             { type: 'uint256[]' },
             { type: 'address[]' },
           ],
-          [mode, targetCallData, validUntilBlock, 0n, signedMaxOutflowTokens, spendersToVerifyZero]
+          [
+            mode,
+            packedExecutionCalldata,
+            validUntilBlock,
+            0n,
+            signedMaxOutflowTokens,
+            spendersToVerifyZero,
+          ]
         );
 
         const maxOutflowHash = keccak256(
@@ -113,8 +147,8 @@ const server = http.createServer(async (req, res) => {
           JSON.stringify({
             enclaveApproved: !policyViolated,
             reason: policyViolated
-              ? 'Blocked by AWS Nitro Enclave Policy Firewall'
-              : `Nitro Enclave Signed (validUntilBlock: ${validUntilBlock})`,
+              ? `Blocked by AWS Nitro Enclave Policy Firewall (${oracleTag})`
+              : `Nitro Enclave Signed (${oracleTag} | validUntilBlock: ${validUntilBlock})`,
             enclaveSigner: enclaveAccount.address,
             enclaveSignature,
             currentBlock: currentBlock.toString(),
@@ -124,9 +158,10 @@ const server = http.createServer(async (req, res) => {
             targetCallData,
           })
         );
-      } catch (e: any) {
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : 'Enclave evaluation failed';
         res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: e.message }));
+        res.end(JSON.stringify({ error: message }));
       }
     });
     return;
@@ -139,3 +174,4 @@ const server = http.createServer(async (req, res) => {
 server.listen(5000, '0.0.0.0', () => {
   console.log('AEGIS-ZK Enclave Policy Server listening on port 5000');
 });
+code /workspaces/aegis-zk-v5/sp1-nitro-verifier/Cargo.toml /workspaces/aegis-zk-v5/sp1-nitro-verifier/script/Cargo.toml /workspaces/aegis-zk-v5/src/AegisSecurityCouncil.sol

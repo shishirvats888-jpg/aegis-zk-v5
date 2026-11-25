@@ -1,5 +1,5 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK SP1 Host Prover
-use alloy_sol_types::sol;
+// Created & Architected by Shishir Vats | AEGIS-ZK SP1 Host Prover (v5.2 Zero-Shortcut)
+use alloy_sol_types::{sol, SolValue};
 use sp1_sdk::{include_elf, ProverClient, SP1Stdin};
 use std::fs;
 
@@ -18,36 +18,45 @@ sol! {
 
 fn main() {
     sp1_sdk::utils::setup_logger();
-    let cose_bytes = fs::read("nitro_attestation.cbor")
-        .expect("Missing nitro_attestation.cbor from AWS Nitro Enclave /dev/nsm");
+
+    // 1. Read genuine AWS Nitro Enclave COSE_Sign1 CBOR attestation from /dev/nsm output
+    let attestation_path = std::env::var("NITRO_ATTESTATION_PATH")
+        .unwrap_or_else(|_| "nitro_attestation.cbor".to_string());
+    let cose_bytes = fs::read(&attestation_path)
+        .unwrap_or_else(|_| panic!("Missing genuine Nitro CBOR attestation at {}", attestation_path));
+
+    // 2. Read genuine enclave ephemeral secp256k1 signer address
     let pub_key_hex = std::env::var("ENCLAVE_PUBKEY")
-        .expect("Set ENCLAVE_PUBKEY (20-byte hex address)");
+        .expect("Set ENCLAVE_PUBKEY (20-byte hex address from Nitro Enclave /health)");
     let pub_key_bytes: [u8; 20] = hex::decode(pub_key_hex.trim_start_matches("0x"))
         .expect("Invalid ENCLAVE_PUBKEY hex")
         .try_into()
         .expect("ENCLAVE_PUBKEY must be 20 bytes");
 
-    let cert_serial = [0x11u8; 32];
-    let now_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let min_not_before = now_ts - 3600;
-    let max_not_after = now_ts + 86400 * 30;
-
+    // 3. Feed only genuine CBOR attestation & signer address into SP1 zkVM (zero hardcoded metadata)
     let mut stdin = SP1Stdin::new();
     stdin.write_vec(cose_bytes);
     stdin.write(&pub_key_bytes);
-    stdin.write(&cert_serial);
-    stdin.write(&now_ts);
-    stdin.write(&min_not_before);
-    stdin.write(&max_not_after);
 
     let client = ProverClient::from_env();
     let (pk, vk) = client.setup(NITRO_VERIFIER_ELF);
-    let proof = client.prove(&pk, &stdin).groth16().run().expect("SP1 Groth16 proving failed");
-    client.verify(&proof, &vk).expect("Local SP1 proof verification failed");
+    let proof = client
+        .prove(&pk, &stdin)
+        .groth16()
+        .run()
+        .expect("SP1 Groth16 proving failed");
 
+    client
+        .verify(&proof, &vk)
+        .expect("Local SP1 Groth16 proof verification failed");
+
+    let decoded = AttestationPublicValues::abi_decode(proof.public_values.as_slice(), true)
+        .expect("Failed to decode 192-byte Solidity AttestationPublicValues");
+
+    println!("VERIFIED_ENCLAVE_SIGNER={}", decoded.pubKeyEnclave);
+    println!("VERIFIED_PCR0=0x{}", hex::encode(decoded.pcr0));
+    println!("VERIFIED_CERT_SERIAL=0x{}", hex::encode(decoded.certSerial));
+    println!("VERIFIED_ATTESTATION_TS={}", decoded.attestationTimestamp);
     println!("PUBLIC_VALUES=0x{}", hex::encode(proof.public_values.as_slice()));
     println!("PROOF_BYTES=0x{}", hex::encode(proof.bytes()));
 }

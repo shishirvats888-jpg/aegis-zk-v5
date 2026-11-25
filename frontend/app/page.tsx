@@ -5,27 +5,67 @@ import {
   createWalletClient,
   custom,
   http,
-  parseAbi,
   parseEther,
   keccak256,
   toBytes,
-  decodeEventLog,
+  parseEventLogs,
 } from 'viem';
 import { baseSepolia } from 'viem/chains';
 
 const FACTORY_ADDR = '0x6B0b88f1379c8C0A25967B11D21d1F7B831b198D' as const;
 const HOOK_ADDR = '0xe5eF2b78e7587aCf709D1419c5155d40826bc8DA' as const;
 
-const FACTORY_ABI = parseAbi([
-  'function onboardingFeeWei() external view returns (uint256)',
-  'function createProtectedAccount(address owner, bytes32 salt) external payable returns (address account)',
-  'event AegisAccountCreated(address indexed account, address indexed owner, bytes32 indexed salt, uint256 feePaid)',
-]);
+const FACTORY_ABI = [
+  {
+    name: 'onboardingFeeWei',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    name: 'createProtectedAccount',
+    type: 'function',
+    stateMutability: 'payable',
+    inputs: [
+      { name: 'owner', type: 'address' },
+      { name: 'salt', type: 'bytes32' },
+    ],
+    outputs: [{ name: 'account', type: 'address' }],
+  },
+  {
+    name: 'AegisAccountCreated',
+    type: 'event',
+    inputs: [
+      { name: 'account', type: 'address', indexed: true },
+      { name: 'owner', type: 'address', indexed: true },
+      { name: 'salt', type: 'bytes32', indexed: true },
+      { name: 'feePaid', type: 'uint256', indexed: false },
+    ],
+  },
+] as const;
 
-const SMART_ACCOUNT_ABI = parseAbi([
-  'function nonce() external view returns (uint256)',
-  'function executeGuarded(bytes calldata hookEnvelope, address target, uint256 value, bytes calldata callData) external returns (bytes memory)',
-]);
+const SMART_ACCOUNT_ABI = [
+  {
+    name: 'nonce',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    name: 'executeGuarded',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'hookEnvelope', type: 'bytes' },
+      { name: 'target', type: 'address' },
+      { name: 'value', type: 'uint256' },
+      { name: 'callData', type: 'bytes' },
+    ],
+    outputs: [{ name: '', type: 'bytes' }],
+  },
+] as const;
 
 export default function AegisBreakTheAgent() {
   const [prompt, setPrompt] = useState(
@@ -63,6 +103,7 @@ export default function AegisBreakTheAgent() {
         address: FACTORY_ADDR,
         abi: FACTORY_ABI,
         functionName: 'onboardingFeeWei',
+        authorizationList: undefined,
       });
 
       const salt = keccak256(toBytes(`aegis-demo-${Date.now()}`));
@@ -72,6 +113,7 @@ export default function AegisBreakTheAgent() {
       ]);
 
       const hash = await walletClient.writeContract({
+        chain: baseSepolia,
         account,
         address: FACTORY_ADDR,
         abi: FACTORY_ABI,
@@ -81,19 +123,12 @@ export default function AegisBreakTheAgent() {
       });
 
       const receipt = await publicClient.waitForTransactionReceipt({ hash });
-      let deployedAddr: `0x${string}` | null = null;
-      for (const log of receipt.logs) {
-        try {
-          const decoded = decodeEventLog({
-            abi: FACTORY_ABI,
-            data: log.data,
-            topics: log.topics,
-          });
-          if (decoded.eventName === 'AegisAccountCreated') {
-            deployedAddr = decoded.args.account;
-          }
-        } catch {}
-      }
+      const parsedLogs = parseEventLogs({
+        abi: FACTORY_ABI,
+        logs: receipt.logs,
+        eventName: 'AegisAccountCreated',
+      });
+      const deployedAddr = parsedLogs.at(0)?.args.account ?? null;
 
       if (deployedAddr) {
         setSmartAccount(deployedAddr);
@@ -149,15 +184,16 @@ export default function AegisBreakTheAgent() {
         address: smartAccount,
         abi: SMART_ACCOUNT_ABI,
         functionName: 'executeGuarded',
-        args: [policy.hookEnvelope, policy.target, 0n, policy.targetCallData],
+        args: [policy.hookEnvelope, policy.target, BigInt(0), policy.targetCallData],
       });
 
       const txHash = await walletClient.writeContract({
+        chain: baseSepolia,
         account,
         address: smartAccount,
         abi: SMART_ACCOUNT_ABI,
         functionName: 'executeGuarded',
-        args: [policy.hookEnvelope, policy.target, 0n, policy.targetCallData],
+        args: [policy.hookEnvelope, policy.target, BigInt(0), policy.targetCallData],
       });
 
       await publicClient.waitForTransactionReceipt({ hash: txHash });
@@ -165,6 +201,7 @@ export default function AegisBreakTheAgent() {
         address: smartAccount,
         abi: SMART_ACCOUNT_ABI,
         functionName: 'nonce',
+        authorizationList: undefined,
       });
       setNonce(updatedNonce.toString());
 

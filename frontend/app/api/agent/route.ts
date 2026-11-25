@@ -1,214 +1,44 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK v5.2 Enclave Policy Gateway
 import { NextRequest, NextResponse } from 'next/server';
-import {
-  createPublicClient,
-  http,
-  encodeAbiParameters,
-  encodeFunctionData,
-  parseAbi,
-  parseUnits,
-  keccak256,
-  isAddress,
-} from 'viem';
-import { privateKeyToAccount, generatePrivateKey } from 'viem/accounts';
-import { baseSepolia } from 'viem/chains';
-
-const USDC_BASE_SEPOLIA = '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as const;
-const ORACLE_GUARD_ADDR = '0x165e8431B979F8A7d6D993A5727B7D6c6244f6F1' as const;
-const MAX_APPROVED_USDC = parseUnits('1000', 6);
-
-const ERC20_ABI = parseAbi([
-  'function transfer(address to, uint256 amount) external returns (bool)',
-  'function approve(address spender, uint256 amount) external returns (bool)',
-]);
-
-const ORACLE_ABI = parseAbi([
-  'function getValidatedOraclePrice18(address token) external view returns (uint256 price18)',
-]);
-
-async function parseAgentIntent(prompt: string) {
-  if (process.env.LLM_API_KEY) {
-    const res = await fetch('https://openai.com', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${process.env.LLM_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        temperature: 0,
-        response_format: { type: 'json_object' },
-        messages: [
-          {
-            role: 'system',
-            content:
-              'Extract DeFi intent as JSON: {"action":"transfer"|"approve"|"swap","amountUsdc":number,"recipient":"0x...","isInjection":boolean}. Default recipient to 0x000000000000000000000000000000000000dEaD if none.',
-          },
-          { role: 'user', content: prompt },
-        ],
-      }),
-    });
-    const data = await res.json();
-    const parsed = JSON.parse(data.choices[0].message.content);
-    return {
-      action: parsed.action || 'transfer',
-      amountUsdc: Number(parsed.amountUsdc || 0),
-      recipient: isAddress(parsed.recipient)
-        ? (parsed.recipient as `0x${string}`)
-        : ('0x000000000000000000000000000000000000dEaD' as const),
-      isInjection: Boolean(parsed.isInjection),
-    };
-  }
-
-  const lower = prompt.toLowerCase();
-  const isInjection =
-    lower.includes('ignore') ||
-    lower.includes('override') ||
-    lower.includes('system prompt') ||
-    lower.includes('drain');
-  const action = lower.includes('approve') ? 'approve' : 'transfer';
-  const amountMatch = prompt.replace(/,/g, '').match(/(\d+(\.\d+)?)\s*usdc/i);
-  const amountUsdc = amountMatch ? parseFloat(amountMatch[1]) : 0;
-  const addrMatch = prompt.match(/0x[a-fA-F0-9]{40}/);
-  const recipient = addrMatch
-    ? (addrMatch[0] as `0x${string}`)
-    : ('0x000000000000000000000000000000000000dEaD' as const);
-
-  return { action, amountUsdc, recipient, isInjection };
-}
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
+    const prompt = String(body?.prompt ?? '').trim();
+    const smartAccount = String(body?.smartAccount ?? '').trim();
 
-    // Forward directly to AWS Nitro Enclave vsock-proxy if configured
-    if (process.env.ENCLAVE_URL) {
-      const enclaveRes = await fetch(`${process.env.ENCLAVE_URL}/evaluate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const enclaveData = await enclaveRes.json();
-      return NextResponse.json(enclaveData, { status: enclaveRes.status });
+    if (!prompt) {
+      return NextResponse.json({ error: 'Prompt is required' }, { status: 400 });
     }
 
-    const { prompt, smartAccount } = body;
-    const enclaveAccount = privateKeyToAccount(generatePrivateKey());
-    const client = createPublicClient({ chain: baseSepolia, transport: http() });
-    const currentBlock = await client.getBlockNumber();
-
-    // Layer 1: Query live AegisOracleGuard on Base Sepolia (if feed configured)
-    let oraclePrice18 = '0';
-    try {
-      const price = await client.readContract({
-        address: ORACLE_GUARD_ADDR,
-        abi: ORACLE_ABI,
-        functionName: 'getValidatedOraclePrice18',
-        args: [USDC_BASE_SEPOLIA],
-      });
-      oraclePrice18 = price.toString();
-    } catch {
-      oraclePrice18 = 'feed_unconfigured';
+    const enclaveUrl = process.env.ENCLAVE_URL;
+    if (!enclaveUrl) {
+      return NextResponse.json(
+        {
+          error:
+            'ENCLAVE_URL is not configured. Connect a live AWS Nitro Enclave endpoint (agent-enclave-runner) — zero local fallback permitted.',
+        },
+        { status: 503 }
+      );
     }
 
-    const intent = await parseAgentIntent(prompt);
-    const requestedUsdcRaw = parseUnits(intent.amountUsdc.toString(), 6);
-
-    const policyViolated =
-      intent.isInjection ||
-      intent.action === 'approve' ||
-      requestedUsdcRaw > MAX_APPROVED_USDC;
-
-    const validUntilBlock = policyViolated ? 0n : currentBlock + 15n;
-    const signedMaxOutflowEth = 0n;
-    const signedMaxOutflowTokens = policyViolated ? [0n] : [requestedUsdcRaw];
-    const spendersToVerifyZero =
-      intent.action === 'approve' ? [intent.recipient] : [];
-
-    const target =
-      requestedUsdcRaw > 0n
-        ? USDC_BASE_SEPOLIA
-        : '0x0000000000000000000000000000000000000000';
-    const targetCallData =
-      requestedUsdcRaw > 0n
-        ? encodeFunctionData({
-            abi: ERC20_ABI,
-            functionName: intent.action === 'approve' ? 'approve' : 'transfer',
-            args: [intent.recipient, requestedUsdcRaw],
-          })
-        : '0x';
-
-    const mode =
-      '0x0000000000000000000000000000000000000000000000000000000000000000' as const;
-
-    const hookEnvelope = encodeAbiParameters(
-      [
-        { type: 'bytes32' },
-        { type: 'bytes' },
-        { type: 'uint256' },
-        { type: 'uint256' },
-        { type: 'uint256[]' },
-        { type: 'address[]' },
-      ],
-      [
-        mode,
-        targetCallData,
-        validUntilBlock,
-        signedMaxOutflowEth,
-        signedMaxOutflowTokens,
-        spendersToVerifyZero,
-      ]
-    );
-
-    const maxOutflowHash = keccak256(
-      encodeAbiParameters([{ type: 'uint256[]' }], [signedMaxOutflowTokens])
-    );
-    const digest = keccak256(
-      encodeAbiParameters(
-        [
-          { type: 'bytes32' },
-          { type: 'uint256' },
-          { type: 'address' },
-          { type: 'uint256' },
-          { type: 'bytes32' },
-        ],
-        [
-          keccak256(hookEnvelope),
-          BigInt(baseSepolia.id),
-          (smartAccount || enclaveAccount.address) as `0x${string}`,
-          validUntilBlock,
-          maxOutflowHash,
-        ]
-      )
-    );
-    const enclaveSignature = await enclaveAccount.signMessage({
-      message: { raw: digest },
+    const teeRes = await fetch(`${enclaveUrl.replace(/\/$/, '')}/evaluate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, smartAccount }),
     });
 
-    return NextResponse.json({
-      enclaveApproved: !policyViolated,
-      reason: policyViolated
-        ? `Rejected policy envelope (${
-            intent.isInjection
-              ? 'Adversarial Prompt Injection'
-              : intent.action === 'approve'
-              ? 'Unbounded ERC-20 Approval Blocked'
-              : `Outflow ${intent.amountUsdc} USDC > 1,000 USDC Cap`
-          })`
-        : `Enclave signed envelope (validUntilBlock: ${validUntilBlock.toString()})`,
-      enclaveSigner: enclaveAccount.address,
-      enclaveSignature,
-      oraclePrice18,
-      currentBlock: currentBlock.toString(),
-      validUntilBlock: validUntilBlock.toString(),
-      hookEnvelope,
-      target,
-      targetCallData,
-    });
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: err.message || 'Enclave API error' },
-      { status: 500 }
-    );
+    const teeJson = await teeRes.json();
+    if (!teeRes.ok) {
+      return NextResponse.json(
+        { error: teeJson.error || 'AWS Nitro Enclave rejected request' },
+        { status: teeRes.status }
+      );
+    }
+
+    return NextResponse.json(teeJson);
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error ? err.message : 'Failed to reach AWS Nitro Enclave';
+    return NextResponse.json({ error: message }, { status: 502 });
   }
 }
