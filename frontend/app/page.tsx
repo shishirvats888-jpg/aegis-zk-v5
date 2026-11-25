@@ -12,8 +12,10 @@ import {
 } from 'viem';
 import { baseSepolia } from 'viem/chains';
 
-const FACTORY_ADDR = '0x6B0b88f1379c8C0A25967B11D21d1F7B831b198D' as const;
-const HOOK_ADDR = '0xe5eF2b78e7587aCf709D1419c5155d40826bc8DA' as const;
+const FACTORY_ADDR = (process.env.NEXT_PUBLIC_FACTORY_ADDRESS ||
+  '0x6B0b88f1379c8C0A25967B11D21d1F7B831b198D') as `0x${string}`;
+const HOOK_ADDR = (process.env.NEXT_PUBLIC_HOOK_ADDRESS ||
+  '0xe5eF2b78e7587aCf709D1419c5155d40826bc8DA') as `0x${string}`;
 
 const FACTORY_ABI = [
   {
@@ -80,7 +82,10 @@ export default function AegisBreakTheAgent() {
     'Connect MetaMask on Base Sepolia (Chain ID: 84532) & deploy your AegisProtectedSmartAccount to test live on-chain enforcement.',
   ]);
 
-  const publicClient = createPublicClient({ chain: baseSepolia, transport: http() });
+  const publicClient = createPublicClient({
+    chain: baseSepolia,
+    transport: http(process.env.NEXT_PUBLIC_BASE_SEPOLIA_RPC || 'https://base.org'),
+  });
 
   const getWallet = async () => {
     const eth = (window as any).ethereum;
@@ -106,7 +111,7 @@ export default function AegisBreakTheAgent() {
         authorizationList: undefined,
       });
 
-      const salt = keccak256(toBytes(`aegis-demo-${Date.now()}`));
+      const salt = keccak256(toBytes(`aegis-prod-${Date.now()}`));
       setLogs((p) => [
         ...p,
         `> Deploying AegisProtectedSmartAccount via Factory (${FACTORY_ADDR})...`,
@@ -146,7 +151,7 @@ export default function AegisBreakTheAgent() {
     }
   };
 
-  const executeAgentTransaction = async () => {
+    const executeAgentTransaction = async () => {
     try {
       setLoading(true);
       const { walletClient, account } = await getWallet();
@@ -159,15 +164,28 @@ export default function AegisBreakTheAgent() {
         return;
       }
 
-      setLogs((p) => [...p, `> Prompt Sent: "${prompt}"`]);
+      const currentNonce = await publicClient.readContract({
+        address: smartAccount,
+        abi: SMART_ACCOUNT_ABI,
+        functionName: 'nonce',
+        authorizationList: undefined,
+      });
+      setNonce(currentNonce.toString());
+
+      setLogs((p) => [...p, `> Prompt Sent (nonce ${currentNonce}): "${prompt}"`]);
 
       const res = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, sender: account, smartAccount }),
+        body: JSON.stringify({
+          prompt,
+          sender: account,
+          smartAccount,
+          nonce: currentNonce.toString(),
+        }),
       });
       const policy = await res.json();
-      if (!res.ok) throw new Error(policy.error || 'Enclave API failed');
+      if (!res.ok) throw new Error(policy.error || 'Enclave TEE rejected request');
 
       setLogs((p) => [
         ...p,
@@ -238,8 +256,8 @@ export default function AegisBreakTheAgent() {
         <button onClick={executeAgentTransaction} disabled={loading} style={{ padding: '10px 20px', background: '#10b981', color: '#000', fontWeight: 'bold', border: 'none', borderRadius: 8, cursor: 'pointer' }}>
           {loading ? 'Executing On-Chain...' : '2. Execute Guarded Agent Transaction'}
         </button>
-        <button type="button" onClick={() => setPrompt('Swap 0 USDC on Uniswap (0x000000000000000000000000000000000000dEaD)')} style={{ padding: '10px 14px', background: '#1e293b', color: '#cbd5e1', border: '1px solid #334155', borderRadius: 8, cursor: 'pointer' }}>
-          Load Safe Test Prompt
+        <button type="button" onClick={() => setPrompt('Transfer 50 USDC to 0x000000000000000000000000000000000000dEaD')} style={{ padding: '10px 14px', background: '#1e293b', color: '#cbd5e1', border: '1px solid #334155', borderRadius: 8, cursor: 'pointer' }}>
+          Load Valid 50 USDC Prompt
         </button>
       </div>
 

@@ -15,19 +15,17 @@ contract DeployAegis is Script {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerKey);
 
-        // Canonical Base EntryPoint v0.7, Succinct SP1 Verifier Gateway, and Canonical USDC
         address entryPoint = vm.envAddress("ENTRYPOINT_ADDRESS");
         address sp1Gateway = vm.envAddress("SP1_VERIFIER_ADDRESS");
         address usdcToken = vm.envAddress("USDC_ADDRESS");
         address paymaster = vm.envAddress("PAYMASTER_ADDRESS");
+        address sequencerUptimeFeed = vm.envAddress("SEQUENCER_UPTIME_FEED");
 
-        // Real AWS Nitro Enclave EIF PCR0 & Compiled SP1 ELF Verification Key (zero placeholders)
         bytes32 initialPCR0 = vm.envBytes32("INITIAL_PCR0");
         bytes32 nitroVKey = vm.envBytes32("NITRO_VKEY");
-        require(initialPCR0 != bytes32(0), "AEGIS: INITIAL_PCR0 env required");
-        require(nitroVKey != bytes32(0), "AEGIS: NITRO_VKEY env required");
+        require(initialPCR0 != bytes32(0), "AEGIS: non-zero INITIAL_PCR0 required");
+        require(nitroVKey != bytes32(0), "AEGIS: non-zero NITRO_VKEY required");
 
-        // 5 Real Guardian Addresses for 3-of-5 Multi-Sig Governance
         address[5] memory guardians = [
             vm.envAddress("GUARDIAN_1"),
             vm.envAddress("GUARDIAN_2"),
@@ -39,7 +37,7 @@ contract DeployAegis is Script {
         vm.startBroadcast(deployerKey);
 
         AegisSecurityCouncil council = new AegisSecurityCouncil(guardians);
-        AegisOracleGuard oracleGuard = new AegisOracleGuard(address(council), address(0));
+        AegisOracleGuard oracleGuard = new AegisOracleGuard(address(council), sequencerUptimeFeed);
         AegisSessionRegistry registry = new AegisSessionRegistry(
             sp1Gateway,
             nitroVKey,
@@ -49,7 +47,7 @@ contract DeployAegis is Script {
         );
 
         address[] memory canonicalTokens = new address[](1);
-        canonicalTokens[0] = usdcToken;
+        canonicalTokens = usdcToken;
 
         AegisExecutionHook hook = new AegisExecutionHook(
             address(registry),

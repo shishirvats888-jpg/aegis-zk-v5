@@ -20,6 +20,10 @@ interface ISecurityCouncilHook {
     function globalPaused() external view returns (bool);
 }
 
+interface IAegisAccountNonce {
+    function nonce() external view returns (uint256);
+}
+
 struct PackedUserOperation {
     address sender;
     uint256 nonce;
@@ -51,6 +55,7 @@ contract AegisExecutionHook {
     bytes4 internal constant SEL_INSTALL_MODULE = 0x9517e29f;
     bytes4 internal constant SEL_UNINSTALL_MODULE = 0xa71763a8;
     bytes4 internal constant SEL_EXEC_FROM_EXECUTOR = 0xd691c964;
+    bytes4 internal constant SEL_ERC20_APPROVE = 0x095ea7b3;
 
     mapping(address => bool) public isCanonicalToken;
     address[] public canonicalTokens;
@@ -81,6 +86,7 @@ contract AegisExecutionHook {
     error AegisDelegatecallForbidden();
     error AegisNonDefaultExecTypeForbidden();
     error AegisSelfCallForbidden();
+    error AegisDirectApproveForbidden();
     error AegisUnauthorizedModuleMutation();
     error AegisInvalidPaymaster();
     error AegisGasPriceExceeded();
@@ -126,28 +132,48 @@ contract AegisExecutionHook {
         }
 
         bytes32 digest = keccak256(abi.encode(userOpHash, block.chainid, userOp.sender, validUntilBlock, maxOutflowHash));
-        address recovered = _recoverSigner(digest, enclaveSignature);
+        bytes32 ethSignedDigest = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", digest));
+        address recovered = _recoverSigner(ethSignedDigest, enclaveSignature);
         if (!sessionRegistry.isValidEnclaveSigner(recovered)) revert AegisInvalidEnclaveSignature();
         return true;
     }
-
     function preCheck(address msgSender, uint256, bytes calldata msgData) external returns (bytes memory hookData) {
         if (address(securityCouncil) != address(0) && securityCouncil.globalPaused()) revert AegisProtocolPaused();
         if (_hookLock != 0) revert AegisNestedExecutionForbidden();
         _hookLock = 1;
 
         address account = msg.sender;
-        (bytes32 mode, bytes memory executionCalldata, uint256 validUntilBlock, uint256 signedMaxOutflowEth, uint256[] memory signedMaxOutflowTokens, address[] memory spendersToVerifyZero) =
-            abi.decode(msgData, (bytes32, bytes, uint256, uint256, uint256[], address[]));
+        (
+            bytes32 mode,
+            bytes memory executionCalldata,
+            uint256 validUntilBlock,
+            uint256 signedMaxOutflowEth,
+            uint256[] memory signedMaxOutflowTokens,
+            address[] memory spendersToVerifyZero,
+            bytes memory enclaveSignature
+        ) = abi.decode(msgData, (bytes32, bytes, uint256, uint256, uint256[], address[], bytes));
 
         if (block.number > validUntilBlock) revert AegisExpiredSignature(block.number, validUntilBlock);
         if (signedMaxOutflowTokens.length != canonicalTokens.length) revert AegisArrayLengthMismatch();
+
+        // Bind account.nonce() into enclave digest to eliminate any intra-window replay
+        uint256 accountNonce = IAegisAccountNonce(account).nonce();
+        bytes32 envelopeCoreHash = keccak256(
+            abi.encode(mode, executionCalldata, validUntilBlock, signedMaxOutflowEth, signedMaxOutflowTokens, spendersToVerifyZero)
+        );
+        bytes32 maxOutflowHash = keccak256(abi.encode(signedMaxOutflowTokens));
+        bytes32 rawDigest = keccak256(
+            abi.encode(envelopeCoreHash, block.chainid, account, accountNonce, validUntilBlock, maxOutflowHash)
+        );
+        bytes32 ethSignedDigest = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", rawDigest));
+        address recoveredSigner = _recoverSignerMemory(ethSignedDigest, enclaveSignature);
+        if (!sessionRegistry.isValidEnclaveSigner(recoveredSigner)) revert AegisInvalidEnclaveSignature();
 
         bytes1 callType = bytes1(mode);
         bytes1 execType = bytes1(mode << 8);
         if (callType == CALLTYPE_DELEGATECALL) revert AegisDelegatecallForbidden();
         if (execType != EXECTYPE_DEFAULT) revert AegisNonDefaultExecTypeForbidden();
-        if (msgSender != governanceTimelock) _assertNoSelfCalls(account, callType, executionCalldata);
+        if (msgSender != governanceTimelock) _assertNoSelfOrDirectApproveCalls(account, callType, executionCalldata);
 
         uint256 nativeAndDepositBefore = account.balance + entryPoint.balanceOf(account);
         uint256 len = canonicalTokens.length;
@@ -189,16 +215,6 @@ contract AegisExecutionHook {
         _hookLock = 0;
     }
 
-    function executeWithZeroResetApproval(address token, address spender, uint256 exactAmount, address targetRouter, bytes calldata routerCalldata) external returns (bytes memory result) {
-        if (!isCanonicalToken[token]) revert AegisNonCanonicalToken(token);
-        if (IERC20(token).allowance(address(this), spender) != 0) _safeApprove(token, spender, 0);
-        _safeApprove(token, spender, exactAmount);
-        (bool success, bytes memory ret) = targetRouter.call(routerCalldata);
-        require(success, "Aegis: router call failed");
-        _safeApprove(token, spender, 0);
-        return ret;
-    }
-
     function _recordAndCheckDailyVelocity(address account, address asset, uint256 actualOutflow) internal {
         uint256 cap = dailyOutflowCap[account][asset];
         if (cap == 0) return;
@@ -212,26 +228,29 @@ contract AegisExecutionHook {
         if (vel.spentInWindow > cap) revert AegisDailyVelocityExceeded(account, asset, vel.spentInWindow, cap);
     }
 
-    function _assertNoSelfCalls(address account, bytes1 callType, bytes memory executionCalldata) internal pure {
+    function _assertNoSelfOrDirectApproveCalls(address account, bytes1 callType, bytes memory executionCalldata) internal pure {
         if (callType == CALLTYPE_SINGLE) {
             require(executionCalldata.length >= 20, "Aegis: short single calldata");
             address target;
             assembly { target := shr(96, mload(add(executionCalldata, 32))) }
             if (target == account) revert AegisSelfCallForbidden();
+            if (executionCalldata.length >= 56) {
+                bytes4 innerSel;
+                assembly { innerSel := mload(add(executionCalldata, 84)) }
+                if (innerSel == SEL_ERC20_APPROVE) revert AegisDirectApproveForbidden();
+            }
         } else if (callType == CALLTYPE_BATCH) {
             Execution[] memory execs = abi.decode(executionCalldata, (Execution[]));
             for (uint256 i = 0; i < execs.length; i++) {
                 if (execs[i].target == account) revert AegisSelfCallForbidden();
+                if (execs[i].callData.length >= 4 && bytes4(execs[i].callData) == SEL_ERC20_APPROVE) {
+                    revert AegisDirectApproveForbidden();
+                }
             }
         }
     }
 
     struct Execution { address target; uint256 value; bytes callData; }
-
-    function _safeApprove(address token, address spender, uint256 amount) internal {
-        (bool ok, bytes memory data) = token.call(abi.encodeWithSelector(IERC20.approve.selector, spender, amount));
-        require(ok && (data.length == 0 || abi.decode(data, (bool))), "Aegis: approve failed");
-    }
 
     function _recoverSigner(bytes32 digest, bytes calldata sig) internal pure returns (address) {
         if (sig.length != 65) revert AegisInvalidEnclaveSignature();
@@ -240,6 +259,22 @@ contract AegisExecutionHook {
             r := calldataload(sig.offset)
             s := calldataload(add(sig.offset, 32))
             v := byte(0, calldataload(add(sig.offset, 64)))
+        }
+        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) revert AegisInvalidEnclaveSignature();
+        if (v < 27) v += 27;
+        if (v != 27 && v != 28) revert AegisInvalidEnclaveSignature();
+        address signer = ecrecover(digest, v, r, s);
+        if (signer == address(0)) revert AegisInvalidEnclaveSignature();
+        return signer;
+    }
+
+    function _recoverSignerMemory(bytes32 digest, bytes memory sig) internal pure returns (address) {
+        if (sig.length != 65) revert AegisInvalidEnclaveSignature();
+        bytes32 r; bytes32 s; uint8 v;
+        assembly {
+            r := mload(add(sig, 32))
+            s := mload(add(sig, 64))
+            v := byte(0, mload(add(sig, 96)))
         }
         if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) revert AegisInvalidEnclaveSignature();
         if (v < 27) v += 27;

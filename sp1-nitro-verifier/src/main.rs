@@ -1,7 +1,8 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK SP1 Nitro Verifier (v5.2 Full P-384 Root-of-Trust)
+// Created & Architected by Shishir Vats | AEGIS-ZK SP1 Nitro Verifier (v5.2 Chain-Bound P-384)
 #![no_main]
 sp1_zkvm::entrypoint!(main);
 
+use alloy_primitives::{Address, U256};
 use alloy_sol_types::{sol, SolValue};
 use ciborium::value::Value;
 use p384::ecdsa::{signature::Verifier, Signature, VerifyingKey};
@@ -24,15 +25,17 @@ sol! {
         uint64 attestationTimestamp;
         uint64 minCertNotBefore;
         uint64 maxCertNotAfter;
+        uint256 boundChainId;
+        address boundRegistry;
     }
 }
 
 pub fn main() {
-    // 1. Read genuine AWS Nitro Enclave COSE_Sign1 CBOR bytes & enclave signer address
     let cose_bytes: Vec<u8> = sp1_zkvm::io::read_vec();
     let pub_key_enclave: [u8; 20] = sp1_zkvm::io::read();
+    let bound_chain_id_bytes: [u8; 32] = sp1_zkvm::io::read();
+    let bound_registry: [u8; 20] = sp1_zkvm::io::read();
 
-    // 2. Parse outer COSE_Sign1 CBOR array: [protected, unprotected, payload, signature]
     let outer: Value = ciborium::de::from_reader(&cose_bytes[..])
         .expect("AEGIS_SP1: invalid outer COSE CBOR");
     let cose_arr = match outer {
@@ -44,20 +47,19 @@ pub fn main() {
         _ => panic!("AEGIS_SP1: outer COSE_Sign1 must be a 4-element array"),
     };
 
-    let protected_bytes = match &cose_arr {
+    let protected_bytes = match &cose_arr[0] {
         Value::Bytes(b) => b.clone(),
         _ => panic!("AEGIS_SP1: COSE protected header must be bytes"),
     };
-    let payload_bytes = match &cose_arr {
+    let payload_bytes = match &cose_arr[2] {
         Value::Bytes(b) => b.clone(),
         _ => panic!("AEGIS_SP1: COSE payload must be bytes"),
     };
-    let cose_sig_bytes = match &cose_arr {
+    let cose_sig_bytes = match &cose_arr[3] {
         Value::Bytes(b) => b.clone(),
         _ => panic!("AEGIS_SP1: COSE signature must be bytes"),
     };
 
-    // 3. Parse AWS Nitro Attestation Document payload & enforce canonical CBOR map ordering
     let payload_val: Value = ciborium::de::from_reader(&payload_bytes[..])
         .expect("AEGIS_SP1: invalid Nitro attestation CBOR payload");
     assert_canonical_cbor(&payload_val);
@@ -71,6 +73,7 @@ pub fn main() {
     let mut timestamp_opt: Option<u64> = None;
     let mut leaf_der_opt: Option<Vec<u8>> = None;
     let mut cabundle_opt: Option<Vec<Vec<u8>>> = None;
+    let mut user_data_opt: Option<Vec<u8>> = None;
 
     for (k, v) in entries {
         if let Value::Text(key_str) = k {
@@ -114,31 +117,48 @@ pub fn main() {
                         cabundle_opt = Some(chain);
                     }
                 }
+                "user_data" => {
+                    if let Value::Bytes(ud) = v {
+                        user_data_opt = Some(ud);
+                    }
+                }
                 _ => {}
             }
         }
     }
 
-    let pcr0 = pcr0_opt.expect("AEGIS_SP1: missing pcrs in Nitro attestation");
+        let pcr0 = pcr0_opt.expect("AEGIS_SP1: missing pcrs[0] in Nitro attestation");
+    assert_ne!(pcr0, [0u8; 32], "AEGIS_SP1: debug-mode zero PCR0 forbidden");
+
     let attestation_timestamp =
         timestamp_opt.expect("AEGIS_SP1: missing timestamp in Nitro attestation");
     let leaf_der = leaf_der_opt.expect("AEGIS_SP1: missing leaf X.509 certificate");
     let cabundle = cabundle_opt.expect("AEGIS_SP1: missing cabundle in Nitro attestation");
+    let user_data = user_data_opt.expect("AEGIS_SP1: missing hardware-bound user_data");
     assert!(!cabundle.is_empty(), "AEGIS_SP1: empty cabundle");
 
-    // 4. Verify AWS Nitro Root-G1 CA fingerprint & walk X.509 signature chain to leaf certificate
-    let root_hash = Sha256::digest(&cabundle);
+    // Enforce 72-byte hardware user_data binding: enclaveSigner (20) || chainId (32) || registry (20)
+    let mut expected_user_data = Vec::with_capacity(72);
+    expected_user_data.extend_from_slice(&pub_key_enclave);
+    expected_user_data.extend_from_slice(&bound_chain_id_bytes);
+    expected_user_data.extend_from_slice(&bound_registry);
+    assert_eq!(
+        user_data, expected_user_data,
+        "AEGIS_SP1: user_data mismatch against (pubKeyEnclave || chainId || registry)"
+    );
+
+    let root_hash = Sha256::digest(&cabundle[0]);
     assert_eq!(
         root_hash.as_slice(),
         &AWS_NITRO_ROOT_G1_SHA256,
-        "AEGIS_SP1: cabundle does not match official AWS Nitro Root-G1 CA"
+        "AEGIS_SP1: cabundle[0] does not match official AWS Nitro Root-G1 CA"
     );
 
     let mut min_not_before: u64 = 0;
     let mut max_not_after: u64 = u64::MAX;
 
     let (_, root_cert) =
-        X509Certificate::from_der(&cabundle).expect("AEGIS_SP1: invalid root DER");
+        X509Certificate::from_der(&cabundle[0]).expect("AEGIS_SP1: invalid root DER");
     update_validity_bounds(&root_cert, &mut min_not_before, &mut max_not_after);
     let mut current_issuer_vk = VerifyingKey::from_sec1_bytes(
         root_cert.public_key().subject_public_key.data.as_ref(),
@@ -166,7 +186,6 @@ pub fn main() {
     )
     .expect("AEGIS_SP1: invalid leaf P-384 public key");
 
-    // 5. Verify RFC 8152 COSE_Sign1 Sig_structure ECDSA P-384 signature using verified leaf key
     let sig_structure = Value::Array(vec![
         Value::Text("Signature1".to_string()),
         Value::Bytes(protected_bytes),
@@ -183,18 +202,19 @@ pub fn main() {
         .verify(&to_be_signed, &cose_sig)
         .expect("AEGIS_SP1: COSE_Sign1 P-384 signature verification failed");
 
-    // 6. Commit 192-byte Solidity ABI-encoded publicValues matching AegisSessionRegistry.sol
     let serial_hash = Sha256::digest(leaf_cert.raw_serial());
     let mut cert_serial = [0u8; 32];
     cert_serial.copy_from_slice(&serial_hash);
 
     let public_values = AttestationPublicValues {
-        pubKeyEnclave: pub_key_enclave.into(),
+        pubKeyEnclave: Address::from(pub_key_enclave),
         pcr0: pcr0.into(),
         certSerial: cert_serial.into(),
         attestationTimestamp: attestation_timestamp,
         minCertNotBefore: min_not_before,
         maxCertNotAfter: max_not_after,
+        boundChainId: U256::from_be_bytes(bound_chain_id_bytes),
+        boundRegistry: Address::from(bound_registry),
     };
 
     sp1_zkvm::io::commit_slice(&public_values.abi_encode());

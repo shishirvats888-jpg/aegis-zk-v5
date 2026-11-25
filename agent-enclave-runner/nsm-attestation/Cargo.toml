@@ -1,0 +1,10 @@
+[package]
+name = "aegis-nsm-attestation"
+version = "0.5.2"
+edition = "2021"
+authors = ["Shishir Vats"]
+
+[dependencies]
+aws-nitro-enclaves-nsm-api = "0.4"
+hex = "0.4"
+serde_bytes = "0.11"

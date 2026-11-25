@@ -6,7 +6,7 @@ interface ISP1Verifier {
     function verifyProof(bytes32 programVKey, bytes calldata publicValues, bytes calldata proofBytes) external view;
 }
 
-interface ISecurityCouncilPause {
+interface ISecurityCouncil {
     function globalPaused() external view returns (bool);
 }
 
@@ -16,12 +16,12 @@ contract AegisSessionRegistry {
 
     ISP1Verifier public immutable sp1Verifier;
     bytes32 public immutable nitroVerifierVKey;
-    ISecurityCouncilPause public immutable securityCouncil;
-    address public governanceTimelock;
+    address public immutable governanceTimelock;
+    ISecurityCouncil public immutable securityCouncil;
 
     bytes32 public latestApprovedPCR0;
-    uint256 public constant KEY_TTL = 24 hours;
-    uint256 public constant MAX_TIMESTAMP_DRIFT = 1 hours;
+    uint256 public constant SESSION_TTL = 24 hours;
+    uint256 public constant MAX_ATTESTATION_AGE = 10 minutes;
 
     struct EnclaveSession {
         uint64 registeredAt;
@@ -32,22 +32,22 @@ contract AegisSessionRegistry {
     }
 
     mapping(address => EnclaveSession) public sessions;
+    mapping(bytes32 => bool) public usedCertSerials;
     mapping(bytes32 => bool) public revokedCertSerials;
-    mapping(bytes32 => bool) public usedAttestationHashes;
 
-    event EnclaveSessionRegistered(address indexed enclaveSigner, bytes32 indexed pcr0, bytes32 certSerial, uint64 expiresAt);
-    event EnclaveSessionRevoked(address indexed enclaveSigner);
-    event ApprovedPCR0Updated(bytes32 indexed oldPCR0, bytes32 indexed newPCR0);
-    event CertSerialRevoked(bytes32 indexed certSerial);
+    event EnclaveSessionRegistered(address indexed enclaveSigner, bytes32 indexed pcr0, bytes32 indexed certSerial, uint64 expiresAt);
+    event EnclaveSessionRevoked(address indexed enclaveSigner, bytes32 indexed certSerial, string reason);
+    event ApprovedPCR0Updated(bytes32 oldPCR0, bytes32 newPCR0);
 
     error AegisProtocolPaused();
     error AegisUnauthorized();
     error AegisInvalidPCR0(bytes32 provided, bytes32 expected);
-    error AegisRevokedCertificate(bytes32 certSerial);
-    error AegisCertificateExpiredOrNotYetValid(uint256 nowTs, uint64 notBefore, uint64 notAfter);
-    error AegisAttestationTimestampDrift(uint256 nowTs, uint64 attestationTs);
-    error AegisAttestationAlreadyUsed(bytes32 attestationHash);
-    error AegisZeroSigner();
+    error AegisZeroPCR0Forbidden();
+    error AegisInvalidChainOrRegistryBinding(uint256 providedChainId, address providedRegistry);
+    error AegisCertSerialReplayOrRevoked(bytes32 certSerial);
+    error AegisStaleAttestation(uint256 attestationTs, uint256 blockTs);
+    error AegisCertificateExpiredOrPremature(uint256 currentTs, uint256 notBefore, uint256 notAfter);
+    error AegisSessionAlreadyActive(address signer);
 
     modifier onlyGovernance() {
         if (msg.sender != governanceTimelock) revert AegisUnauthorized();
@@ -60,59 +60,75 @@ contract AegisSessionRegistry {
     }
 
     constructor(address _sp1Verifier, bytes32 _nitroVerifierVKey, bytes32 _initialApprovedPCR0, address _governanceTimelock, address _securityCouncil) {
+        if (_initialApprovedPCR0 == bytes32(0)) revert AegisZeroPCR0Forbidden();
         sp1Verifier = ISP1Verifier(_sp1Verifier);
         nitroVerifierVKey = _nitroVerifierVKey;
         latestApprovedPCR0 = _initialApprovedPCR0;
         governanceTimelock = _governanceTimelock;
-        securityCouncil = ISecurityCouncilPause(_securityCouncil);
+        securityCouncil = ISecurityCouncil(_securityCouncil);
     }
 
     function registerEnclaveSession(bytes calldata publicValues, bytes calldata proofBytes) external whenNotPaused {
-        bytes32 attHash = keccak256(publicValues);
-        if (usedAttestationHashes[attHash]) revert AegisAttestationAlreadyUsed(attHash);
-        usedAttestationHashes[attHash] = true;
-
         sp1Verifier.verifyProof(nitroVerifierVKey, publicValues, proofBytes);
 
-        (address pubKeyEnclave, bytes32 pcr0, bytes32 certSerial, uint64 attestationTimestamp, uint64 minCertNotBefore, uint64 maxCertNotAfter) =
-            abi.decode(publicValues, (address, bytes32, bytes32, uint64, uint64, uint64));
+        (
+            address pubKeyEnclave,
+            bytes32 pcr0,
+            bytes32 certSerial,
+            uint64 attestationTimestamp,
+            uint64 minCertNotBefore,
+            uint64 maxCertNotAfter,
+            uint256 boundChainId,
+            address boundRegistry
+        ) = abi.decode(publicValues, (address, bytes32, bytes32, uint64, uint64, uint64, uint256, address));
 
-        if (pubKeyEnclave == address(0)) revert AegisZeroSigner();
+        if (boundChainId != block.chainid || boundRegistry != address(this)) {
+            revert AegisInvalidChainOrRegistryBinding(boundChainId, boundRegistry);
+        }
+        if (pcr0 == bytes32(0) || latestApprovedPCR0 == bytes32(0)) revert AegisZeroPCR0Forbidden();
         if (pcr0 != latestApprovedPCR0) revert AegisInvalidPCR0(pcr0, latestApprovedPCR0);
-        if (revokedCertSerials[certSerial]) revert AegisRevokedCertificate(certSerial);
+        if (usedCertSerials[certSerial] || revokedCertSerials[certSerial]) revert AegisCertSerialReplayOrRevoked(certSerial);
+        if (attestationTimestamp > block.timestamp + 60 || block.timestamp - attestationTimestamp > MAX_ATTESTATION_AGE) {
+            revert AegisStaleAttestation(attestationTimestamp, block.timestamp);
+        }
         if (block.timestamp < minCertNotBefore || block.timestamp > maxCertNotAfter) {
-            revert AegisCertificateExpiredOrNotYetValid(block.timestamp, minCertNotBefore, maxCertNotAfter);
+            revert AegisCertificateExpiredOrPremature(block.timestamp, minCertNotBefore, maxCertNotAfter);
         }
 
-        uint256 drift = block.timestamp >= attestationTimestamp ? block.timestamp - attestationTimestamp : attestationTimestamp - block.timestamp;
-        if (drift > MAX_TIMESTAMP_DRIFT) revert AegisAttestationTimestampDrift(block.timestamp, attestationTimestamp);
+        EnclaveSession storage existing = sessions[pubKeyEnclave];
+        if (existing.expiresAt > block.timestamp && !existing.revoked) revert AegisSessionAlreadyActive(pubKeyEnclave);
 
-        uint64 expiresAt = uint64(block.timestamp + KEY_TTL);
-        sessions[pubKeyEnclave] = EnclaveSession(uint64(block.timestamp), expiresAt, pcr0, certSerial, false);
-        emit EnclaveSessionRegistered(pubKeyEnclave, pcr0, certSerial, expiresAt);
+        usedCertSerials[certSerial] = true;
+        uint64 exp = uint64(block.timestamp + SESSION_TTL);
+        sessions[pubKeyEnclave] = EnclaveSession(uint64(block.timestamp), exp, pcr0, certSerial, false);
+
+        emit EnclaveSessionRegistered(pubKeyEnclave, pcr0, certSerial, exp);
     }
 
-    function isValidEnclaveSigner(address signer) external view returns (bool) {
-        if (address(securityCouncil) != address(0) && securityCouncil.globalPaused()) return false;
-        EnclaveSession memory s = sessions[signer];
-        if (s.registeredAt == 0 || s.revoked || block.timestamp > s.expiresAt) return false;
-        if (s.pcr0 != latestApprovedPCR0 || revokedCertSerials[s.certSerial]) return false;
-        return true;
+    function emergencyRevokeSession(address enclaveSigner, string calldata reason) external onlyGovernance {
+        EnclaveSession storage s = sessions[enclaveSigner];
+        s.revoked = true;
+        revokedCertSerials[s.certSerial] = true;
+        emit EnclaveSessionRevoked(enclaveSigner, s.certSerial, reason);
     }
 
     function updateApprovedPCR0(bytes32 newPCR0) external onlyGovernance {
+        if (newPCR0 == bytes32(0)) revert AegisZeroPCR0Forbidden();
         bytes32 old = latestApprovedPCR0;
         latestApprovedPCR0 = newPCR0;
         emit ApprovedPCR0Updated(old, newPCR0);
     }
 
-    function revokeCertSerial(bytes32 certSerial) external onlyGovernance {
-        revokedCertSerials[certSerial] = true;
-        emit CertSerialRevoked(certSerial);
-    }
-
-    function emergencyRevokeSigner(address enclaveSigner) external onlyGovernance {
-        sessions[enclaveSigner].revoked = true;
-        emit EnclaveSessionRevoked(enclaveSigner);
+    function isValidEnclaveSigner(address signer) external view returns (bool) {
+        if (address(securityCouncil) != address(0) && securityCouncil.globalPaused()) return false;
+        EnclaveSession memory s = sessions[signer];
+        return (
+            s.registeredAt > 0 &&
+            !s.revoked &&
+            !revokedCertSerials[s.certSerial] &&
+            block.timestamp <= s.expiresAt &&
+            s.pcr0 != bytes32(0) &&
+            s.pcr0 == latestApprovedPCR0
+        );
     }
 }

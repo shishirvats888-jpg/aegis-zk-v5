@@ -32,6 +32,7 @@ contract AegisOracleGuard {
 
     event TokenFeedConfigured(address indexed token, address indexed feed, address wstEthWrapper, uint256 maxStaleness, uint256 maxDeviationBps);
     error AegisUnauthorized();
+    error AegisZeroSequencerFeed();
     error AegisSequencerDown();
     error AegisSequencerGracePeriodNotOver(uint256 elapsed, uint256 required);
     error AegisFeedNotConfigured(address token);
@@ -45,6 +46,8 @@ contract AegisOracleGuard {
     }
 
     constructor(address _governanceTimelock, address _sequencerUptimeFeed) {
+        if (_governanceTimelock == address(0)) revert AegisUnauthorized();
+        if (_sequencerUptimeFeed == address(0)) revert AegisZeroSequencerFeed();
         governanceTimelock = _governanceTimelock;
         sequencerUptimeFeed = IAggregatorV3(_sequencerUptimeFeed);
     }
@@ -55,13 +58,12 @@ contract AegisOracleGuard {
     }
 
     function getValidatedOraclePrice18(address token) public view returns (uint256 price18) {
-        if (address(sequencerUptimeFeed) != address(0)) {
-            (, int256 answer, uint256 startedAt, , ) = sequencerUptimeFeed.latestRoundData();
-            if (answer != 0) revert AegisSequencerDown();
-            if (startedAt == 0 || block.timestamp - startedAt <= SEQUENCER_GRACE_PERIOD) {
-                revert AegisSequencerGracePeriodNotOver(startedAt == 0 ? 0 : block.timestamp - startedAt, SEQUENCER_GRACE_PERIOD);
-            }
+        (, int256 answer, uint256 startedAt, , ) = sequencerUptimeFeed.latestRoundData();
+        if (answer != 0) revert AegisSequencerDown();
+        if (startedAt == 0 || block.timestamp - startedAt <= SEQUENCER_GRACE_PERIOD) {
+            revert AegisSequencerGracePeriodNotOver(startedAt == 0 ? 0 : block.timestamp - startedAt, SEQUENCER_GRACE_PERIOD);
         }
+
         FeedConfig memory cfg = tokenFeeds[token];
         if (!cfg.enabled || cfg.chainlinkFeed == address(0)) revert AegisFeedNotConfigured(token);
 
