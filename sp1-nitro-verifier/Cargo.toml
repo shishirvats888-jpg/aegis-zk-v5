@@ -3,7 +3,7 @@ name = "aegis-nitro-verifier"
 version = "0.5.2"
 edition = "2021"
 authors = ["Shishir Vats"]
-description = "AEGIS-ZK Nitro Enclave SP1 Verifier - Created by Shishir Vats"
+description = "AEGIS-ZK Nitro Enclave SP1 Verifier - Full P-384 Root-of-Trust Edition"
 
 [dependencies]
 sp1-zkvm = "4.0.0"
@@ -11,3 +11,4 @@ ciborium = "0.2.2"
 sha2 = "0.10.8"
 alloy-sol-types = "0.8"
 x509-parser = "0.16"
+p384 = { version = "0.13", features = ["ecdsa", "sha384"] }

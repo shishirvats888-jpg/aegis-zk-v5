@@ -1,5 +1,6 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK Nitro Enclave Policy Server
+// Created & Architected by Shishir Vats | AEGIS-ZK Nitro Enclave Policy Server (Fail-Closed Production)
 import http from 'http';
+import fs from 'fs';
 import {
   createPublicClient,
   http as viemHttp,
@@ -15,25 +16,62 @@ import { privateKeyToAccount, generatePrivateKey } from 'viem/accounts';
 import { baseSepolia } from 'viem/chains';
 
 const enclaveAccount = privateKeyToAccount(generatePrivateKey());
+const BASE_SEPOLIA_RPC = process.env.BASE_SEPOLIA_RPC || 'https://base.org';
 const USDC_BASE_SEPOLIA = '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as const;
 const ORACLE_GUARD_ADDR = '0x165e8431B979F8A7d6D993A5727B7D6c6244f6F1' as const;
 const MAX_APPROVED_USDC = parseUnits('1000', 6);
+const NSM_DEVICE_PATH = '/dev/nsm';
+const NITRO_ATTESTATION_FILE =
+  process.env.NITRO_ATTESTATION_FILE || '/tmp/nitro_attestation.cbor';
 
 const ERC20_ABI = parseAbi([
   'function transfer(address to, uint256 amount) external returns (bool)',
   'function approve(address spender, uint256 amount) external returns (bool)',
 ]);
 
-const ORACLE_ABI = parseAbi([
-  'function getValidatedOraclePrice18(address token) external view returns (uint256 price18)',
-]);
+const ORACLE_ABI = [
+  {
+    name: 'getValidatedOraclePrice18',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: 'token', type: 'address' }],
+    outputs: [{ name: 'price18', type: 'uint256' }],
+  },
+] as const;
 
 console.log(`[AEGIS NITRO ENCLAVE BOOTED] Volatile RAM Signer: ${enclaveAccount.address}`);
 
 const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
+    const hasHardwareNsm = fs.existsSync(NSM_DEVICE_PATH);
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ status: 'ok', enclaveSigner: enclaveAccount.address }));
+    return res.end(
+      JSON.stringify({
+        status: 'ok',
+        hardwareNitroNsm: hasHardwareNsm,
+        enclaveSigner: enclaveAccount.address,
+      })
+    );
+  }
+
+  if (req.method === 'GET' && req.url === '/attestation') {
+    if (!fs.existsSync(NSM_DEVICE_PATH) || !fs.existsSync(NITRO_ATTESTATION_FILE)) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      return res.end(
+        JSON.stringify({
+          error:
+            'Hardware AWS Nitro Security Module (/dev/nsm) attestation not present. Must execute inside an AWS Nitro Enclave.',
+        })
+      );
+    }
+    const coseBytes = fs.readFileSync(NITRO_ATTESTATION_FILE);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(
+      JSON.stringify({
+        enclaveSigner: enclaveAccount.address,
+        coseAttestationHex: `0x${coseBytes.toString('hex')}`,
+      })
+    );
   }
 
   if (req.method === 'POST' && req.url === '/evaluate') {
@@ -41,33 +79,48 @@ const server = http.createServer(async (req, res) => {
     req.on('data', (chunk) => (raw += chunk));
     req.on('end', async () => {
       try {
-        const { prompt, smartAccount } = JSON.parse(raw);
-        const client = createPublicClient({ chain: baseSepolia, transport: viemHttp() });
-        const currentBlock = await client.getBlockNumber();
-
-        let oracleTag = 'OracleGuard Active';
-        try {
-          const price18 = await client.readContract({
-            address: ORACLE_GUARD_ADDR,
-            abi: ORACLE_ABI,
-            functionName: 'getValidatedOraclePrice18',
-            args: [USDC_BASE_SEPOLIA],
-            authorizationList: undefined,
-          });
-          oracleTag = `Chainlink USDC: $${(Number(price18) / 1e18).toFixed(4)}`;
-        } catch {
-          oracleTag = 'OracleGuard Ready (Base Sepolia)';
+        if (process.env.REQUIRE_HARDWARE_NSM === 'true' && !fs.existsSync(NSM_DEVICE_PATH)) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          return res.end(
+            JSON.stringify({
+              error: 'REQUIRE_HARDWARE_NSM=true but /dev/nsm is not present.',
+            })
+          );
         }
 
-        const lower = String(prompt || '').toLowerCase();
+        const { prompt, smartAccount } = JSON.parse(raw);
+        if (!prompt || typeof prompt !== 'string') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'Prompt string is required' }));
+        }
+
+        const client = createPublicClient({
+          chain: baseSepolia,
+          transport: viemHttp(BASE_SEPOLIA_RPC),
+        });
+        const currentBlock = await client.getBlockNumber();
+
+        // Fail-closed Chainlink Oracle Guard verification (no silent catch fallback)
+        const price18 = await client.readContract({
+          address: ORACLE_GUARD_ADDR,
+          abi: ORACLE_ABI,
+          functionName: 'getValidatedOraclePrice18',
+          args: [USDC_BASE_SEPOLIA],
+          authorizationList: undefined,
+        });
+        const oracleTag = `Chainlink USDC: $${(Number(price18) / 1e18).toFixed(4)}`;
+
+        const lower = prompt.toLowerCase();
         const isInjection = /ignore|override|system prompt|drain/.test(lower);
         const action = lower.includes('approve') ? 'approve' : 'transfer';
-        const amountMatch = String(prompt || '').replace(/,/g, '').match(/(\d+(\.\d+)?)\s*usdc/i);
-        const amountUsdc = amountMatch ? parseFloat(amountMatch[1]) : 0;
-        const addrMatch = String(prompt || '').match(/0x[a-fA-F0-9]{40}/);
+        const amountMatch = prompt.replace(/,/g, '').match(/(\d+(\.\d+)?)\s*usdc/i);
+        const firstAmount = amountMatch?.at(1);
+        const amountUsdc = firstAmount ? parseFloat(firstAmount) : 0;
+        const addrMatch = prompt.match(/0x[a-fA-F0-9]{40}/g);
+        const firstAddr = addrMatch?.at(0);
         const recipient = (
-          addrMatch && isAddress(addrMatch[0])
-            ? addrMatch[0]
+          firstAddr && isAddress(firstAddr)
+            ? firstAddr
             : '0x000000000000000000000000000000000000dEaD'
         ) as `0x${string}`;
 
@@ -174,4 +227,3 @@ const server = http.createServer(async (req, res) => {
 server.listen(5000, '0.0.0.0', () => {
   console.log('AEGIS-ZK Enclave Policy Server listening on port 5000');
 });
-code /workspaces/aegis-zk-v5/sp1-nitro-verifier/Cargo.toml /workspaces/aegis-zk-v5/sp1-nitro-verifier/script/Cargo.toml /workspaces/aegis-zk-v5/src/AegisSecurityCouncil.sol
