@@ -100,9 +100,17 @@ contract AegisProtectedSmartAccount {
         bytes1 callType = bytes1(mode);
         if (callType == CALLTYPE_SINGLE) {
             require(innerExecutionData.length >= 52, "Aegis: short single calldata");
-            address target = address(bytes20(innerExecutionData[:20]));
-            uint256 value = uint256(bytes32(innerExecutionData[20:52]));
-            bytes memory callData = innerExecutionData[52:];
+            address target;
+            uint256 value;
+            assembly {
+                target := shr(96, mload(add(innerExecutionData, 32)))
+                value := mload(add(innerExecutionData, 52))
+            }
+            uint256 dataLen = innerExecutionData.length - 52;
+            bytes memory callData = new bytes(dataLen);
+            for (uint256 i = 0; i < dataLen; i++) {
+                callData[i] = innerExecutionData[52 + i];
+            }
 
             results = new bytes[](1);
             if (target != address(0)) {
