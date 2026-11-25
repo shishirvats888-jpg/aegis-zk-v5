@@ -152,7 +152,7 @@ contract AegisFullSystemTest is Test {
         );
 
         address[] memory tokens = new address[](1);
-        tokens = address(usdc);
+        tokens[0] = address(usdc);
 
         hook = new AegisExecutionHook(
             address(registry),
@@ -199,7 +199,7 @@ contract AegisFullSystemTest is Test {
     ) internal view returns (bytes memory hookEnvelope) {
         bytes32 mode = bytes32(0);
         uint256[] memory maxTokens = new uint256[](1);
-        maxTokens = maxUsdcOutflow;
+        maxTokens[0] = maxUsdcOutflow;
 
         bytes32 coreHash = keccak256(
             abi.encode(mode, executionCalldata, validUntilBlock, uint256(0), maxTokens, spendersZero)
@@ -237,11 +237,10 @@ contract AegisFullSystemTest is Test {
         bytes memory env = _signEnvelope(acct, 0, execData, block.number + 20, 250e6, spenders);
 
         vm.prank(owner);
-        AegisProtectedSmartAccount(payable(acct)).executeGuarded(env, address(address(usdc)), 0, callData);
+        AegisProtectedSmartAccount(payable(acct)).executeGuarded(env, address(usdc), 0, callData);
         assertEq(usdc.balanceOf(recipient), 250e6);
         assertEq(AegisProtectedSmartAccount(payable(acct)).nonce(), 1);
 
-        // Immediate replay of exact same signature 1 block later MUST revert due to nonce increment
         vm.prank(owner);
         vm.expectRevert(AegisExecutionHook.AegisInvalidEnclaveSignature.selector);
         AegisProtectedSmartAccount(payable(acct)).executeGuarded(env, address(usdc), 0, callData);
@@ -278,7 +277,7 @@ contract AegisFullSystemTest is Test {
         );
         bytes memory execData = abi.encodePacked(address(router), uint256(0), routerCall);
         address[] memory spenders = new address[](1);
-        spenders = address(router);
+        spenders[0] = address(router);
 
         bytes memory env = _signEnvelope(acct, 0, execData, block.number + 20, 400e6, spenders);
 

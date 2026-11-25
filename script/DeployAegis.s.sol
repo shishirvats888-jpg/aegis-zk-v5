@@ -47,7 +47,7 @@ contract DeployAegis is Script {
         );
 
         address[] memory canonicalTokens = new address[](1);
-        canonicalTokens = usdcToken;
+        canonicalTokens[0] = usdcToken;
 
         AegisExecutionHook hook = new AegisExecutionHook(
             address(registry),
