@@ -1,4 +1,4 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK (v5.2 Zero-Trust Edition)
+// Created & Architected by Shishir Vats | AEGIS-ZK (v5.2 Zero-Trust ERC-4337 / ERC-7579 Edition)
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
@@ -30,10 +30,20 @@ contract AegisProtectedSmartAccount {
     address public immutable entryPoint;
     uint256 public nonce;
 
+    bytes1 internal constant CALLTYPE_SINGLE = 0x00;
+    bytes1 internal constant CALLTYPE_BATCH = 0x01;
+
+    struct Execution {
+        address target;
+        uint256 value;
+        bytes callData;
+    }
+
     error AegisOnlyOwnerOrEntryPoint();
     error AegisOnlyEntryPoint();
     error AegisInvalidOwnerSignature();
     error AegisApproveFailed();
+    error AegisUnsupportedCallType(bytes1 callType);
 
     constructor(address _owner, address _aegisHook, address _entryPoint) {
         owner = _owner;
@@ -43,6 +53,11 @@ contract AegisProtectedSmartAccount {
     }
 
     receive() external payable {}
+
+    function supportsModule(uint256 moduleTypeId) external pure returns (bool) {
+        // ERC-7579 Module Type 1 (Validator) & Module Type 4 (Hook)
+        return moduleTypeId == 1 || moduleTypeId == 4;
+    }
 
     function validateUserOp(
         PackedUserOperation calldata userOp,
@@ -70,6 +85,52 @@ contract AegisProtectedSmartAccount {
         return 0;
     }
 
+    // Canonical ERC-7579 execute(bytes32 mode, bytes calldata executionCalldata) entrypoint
+    function execute(bytes32 mode, bytes calldata executionCalldata) external payable returns (bytes[] memory results) {
+        if (msg.sender != owner && msg.sender != entryPoint) revert AegisOnlyOwnerOrEntryPoint();
+        (bytes memory hookEnvelope, bytes memory innerExecutionData) = abi.decode(executionCalldata, (bytes, bytes));
+
+        bytes memory hookData = aegisHook.preCheck(
+            msg.sender,
+            msg.value,
+            abi.encode(hookEnvelope, keccak256(innerExecutionData))
+        );
+        nonce += 1;
+
+        bytes1 callType = bytes1(mode);
+        if (callType == CALLTYPE_SINGLE) {
+            require(innerExecutionData.length >= 52, "Aegis: short single calldata");
+            address target = address(bytes20(innerExecutionData[:20]));
+            uint256 value = uint256(bytes32(innerExecutionData[20:52]));
+            bytes calldata callData = innerExecutionData[52:];
+
+            results = new bytes[](1);
+            if (target != address(0)) {
+                (bool ok, bytes memory ret) = target.call{value: value}(callData);
+                if (!ok) {
+                    assembly { revert(add(ret, 32), mload(ret)) }
+                }
+                results = ret;
+            }
+        } else if (callType == CALLTYPE_BATCH) {
+            Execution[] memory execs = abi.decode(innerExecutionData, (Execution[]));
+            results = new bytes[](execs.length);
+            for (uint256 i = 0; i < execs.length; i++) {
+                if (execs[i].target != address(0)) {
+                    (bool ok, bytes memory ret) = execs[i].target.call{value: execs[i].value}(execs[i].callData);
+                    if (!ok) {
+                        assembly { revert(add(ret, 32), mload(ret)) }
+                    }
+                    results[i] = ret;
+                }
+            }
+        } else {
+            revert AegisUnsupportedCallType(callType);
+        }
+
+        aegisHook.postCheck(hookData);
+    }
+
     function executeGuarded(
         bytes calldata hookEnvelope,
         address target,
@@ -77,7 +138,12 @@ contract AegisProtectedSmartAccount {
         bytes calldata callData
     ) external returns (bytes memory result) {
         if (msg.sender != owner && msg.sender != entryPoint) revert AegisOnlyOwnerOrEntryPoint();
-        bytes memory hookData = aegisHook.preCheck(msg.sender, value, hookEnvelope);
+        bytes32 actualPackedCallHash = keccak256(abi.encodePacked(target, value, callData));
+        bytes memory hookData = aegisHook.preCheck(
+            msg.sender,
+            value,
+            abi.encode(hookEnvelope, actualPackedCallHash)
+        );
         nonce += 1;
         if (target != address(0)) {
             (bool ok, bytes memory ret) = target.call{value: value}(callData);
@@ -98,7 +164,12 @@ contract AegisProtectedSmartAccount {
         bytes calldata routerCalldata
     ) external returns (bytes memory result) {
         if (msg.sender != owner && msg.sender != entryPoint) revert AegisOnlyOwnerOrEntryPoint();
-        bytes memory hookData = aegisHook.preCheck(msg.sender, 0, hookEnvelope);
+        bytes32 actualPackedCallHash = keccak256(abi.encodePacked(targetRouter, uint256(0), routerCalldata));
+        bytes memory hookData = aegisHook.preCheck(
+            msg.sender,
+            0,
+            abi.encode(hookEnvelope, actualPackedCallHash)
+        );
         nonce += 1;
 
         if (IERC20Account(token).allowance(address(this), spender) != 0) {

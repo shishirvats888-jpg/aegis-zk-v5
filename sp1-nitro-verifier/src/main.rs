@@ -1,8 +1,8 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK SP1 Nitro Verifier (v5.2 Chain-Bound P-384)
+// Created & Architected by Shishir Vats | AEGIS-ZK SP1 Nitro Verifier (v5.2 Full 48-Byte SHA-384 P-384)
 #![no_main]
 sp1_zkvm::entrypoint!(main);
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, FixedBytes, U256};
 use alloy_sol_types::{sol, SolValue};
 use ciborium::value::Value;
 use p384::ecdsa::{signature::Verifier, Signature, VerifyingKey};
@@ -20,7 +20,8 @@ const AWS_NITRO_ROOT_G1_SHA256: [u8; 32] = [
 sol! {
     struct AttestationPublicValues {
         address pubKeyEnclave;
-        bytes32 pcr0;
+        bytes32 pcr0High;
+        bytes16 pcr0Low;
         bytes32 certSerial;
         uint64 attestationTimestamp;
         uint64 minCertNotBefore;
@@ -47,15 +48,15 @@ pub fn main() {
         _ => panic!("AEGIS_SP1: outer COSE_Sign1 must be a 4-element array"),
     };
 
-    let protected_bytes = match &cose_arr[0] {
+    let protected_bytes = match &cose_arr {
         Value::Bytes(b) => b.clone(),
         _ => panic!("AEGIS_SP1: COSE protected header must be bytes"),
     };
-    let payload_bytes = match &cose_arr[2] {
+    let payload_bytes = match &cose_arr {
         Value::Bytes(b) => b.clone(),
         _ => panic!("AEGIS_SP1: COSE payload must be bytes"),
     };
-    let cose_sig_bytes = match &cose_arr[3] {
+    let cose_sig_bytes = match &cose_arr {
         Value::Bytes(b) => b.clone(),
         _ => panic!("AEGIS_SP1: COSE signature must be bytes"),
     };
@@ -69,7 +70,7 @@ pub fn main() {
         _ => panic!("AEGIS_SP1: Nitro payload must be a CBOR map"),
     };
 
-    let mut pcr0_opt: Option<[u8; 32]> = None;
+    let mut pcr0_opt: Option<[u8; 48]> = None;
     let mut timestamp_opt: Option<u64> = None;
     let mut leaf_der_opt: Option<Vec<u8>> = None;
     let mut cabundle_opt: Option<Vec<Vec<u8>>> = None;
@@ -92,9 +93,13 @@ pub fn main() {
                             if let (Value::Integer(idx), Value::Bytes(pcr_bytes)) = (pk, pv) {
                                 let idx_u8: u8 = idx.try_into().unwrap_or(255);
                                 if idx_u8 == 0 {
-                                    assert!(pcr_bytes.len() >= 32, "AEGIS_SP1: PCR0 < 32 bytes");
-                                    let mut arr = [0u8; 32];
-                                    arr.copy_from_slice(&pcr_bytes[..32]);
+                                    assert_eq!(
+                                        pcr_bytes.len(),
+                                        48,
+                                        "AEGIS_SP1: Nitro SHA-384 PCR0 must be exact 48 bytes"
+                                    );
+                                    let mut arr = [0u8; 48];
+                                    arr.copy_from_slice(&pcr_bytes[..48]);
                                     pcr0_opt = Some(arr);
                                 }
                             }
@@ -127,8 +132,13 @@ pub fn main() {
         }
     }
 
-        let pcr0 = pcr0_opt.expect("AEGIS_SP1: missing pcrs[0] in Nitro attestation");
-    assert_ne!(pcr0, [0u8; 32], "AEGIS_SP1: debug-mode zero PCR0 forbidden");
+        let pcr0 = pcr0_opt.expect("AEGIS_SP1: missing pcrs in Nitro attestation");
+    assert_ne!(pcr0, [0u8; 48], "AEGIS_SP1: debug-mode all-zero 48-byte PCR0 forbidden");
+
+    let mut pcr0_high = [0u8; 32];
+    let mut pcr0_low = [0u8; 16];
+    pcr0_high.copy_from_slice(&pcr0[..32]);
+    pcr0_low.copy_from_slice(&pcr0[32..48]);
 
     let attestation_timestamp =
         timestamp_opt.expect("AEGIS_SP1: missing timestamp in Nitro attestation");
@@ -137,7 +147,6 @@ pub fn main() {
     let user_data = user_data_opt.expect("AEGIS_SP1: missing hardware-bound user_data");
     assert!(!cabundle.is_empty(), "AEGIS_SP1: empty cabundle");
 
-    // Enforce 72-byte hardware user_data binding: enclaveSigner (20) || chainId (32) || registry (20)
     let mut expected_user_data = Vec::with_capacity(72);
     expected_user_data.extend_from_slice(&pub_key_enclave);
     expected_user_data.extend_from_slice(&bound_chain_id_bytes);
@@ -147,18 +156,18 @@ pub fn main() {
         "AEGIS_SP1: user_data mismatch against (pubKeyEnclave || chainId || registry)"
     );
 
-    let root_hash = Sha256::digest(&cabundle[0]);
+    let root_hash = Sha256::digest(&cabundle);
     assert_eq!(
         root_hash.as_slice(),
         &AWS_NITRO_ROOT_G1_SHA256,
-        "AEGIS_SP1: cabundle[0] does not match official AWS Nitro Root-G1 CA"
+        "AEGIS_SP1: cabundle does not match official AWS Nitro Root-G1 CA"
     );
 
     let mut min_not_before: u64 = 0;
     let mut max_not_after: u64 = u64::MAX;
 
     let (_, root_cert) =
-        X509Certificate::from_der(&cabundle[0]).expect("AEGIS_SP1: invalid root DER");
+        X509Certificate::from_der(&cabundle).expect("AEGIS_SP1: invalid root DER");
     update_validity_bounds(&root_cert, &mut min_not_before, &mut max_not_after);
     let mut current_issuer_vk = VerifyingKey::from_sec1_bytes(
         root_cert.public_key().subject_public_key.data.as_ref(),
@@ -208,7 +217,8 @@ pub fn main() {
 
     let public_values = AttestationPublicValues {
         pubKeyEnclave: Address::from(pub_key_enclave),
-        pcr0: pcr0.into(),
+        pcr0High: FixedBytes::from(pcr0_high),
+        pcr0Low: FixedBytes::from(pcr0_low),
         certSerial: cert_serial.into(),
         attestationTimestamp: attestation_timestamp,
         minCertNotBefore: min_not_before,

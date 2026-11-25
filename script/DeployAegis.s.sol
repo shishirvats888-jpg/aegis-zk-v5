@@ -1,4 +1,4 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK (v5.2 Zero-Trust Edition)
+// Created & Architected by Shishir Vats | AEGIS-ZK (v5.2 Zero-Trust Full SHA-384 Edition)
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
@@ -21,9 +21,10 @@ contract DeployAegis is Script {
         address paymaster = vm.envAddress("PAYMASTER_ADDRESS");
         address sequencerUptimeFeed = vm.envAddress("SEQUENCER_UPTIME_FEED");
 
-        bytes32 initialPCR0 = vm.envBytes32("INITIAL_PCR0");
+        bytes32 initialPCR0High = vm.envBytes32("INITIAL_PCR0_HIGH");
+        bytes16 initialPCR0Low = bytes16(vm.envBytes32("INITIAL_PCR0_LOW"));
         bytes32 nitroVKey = vm.envBytes32("NITRO_VKEY");
-        require(initialPCR0 != bytes32(0), "AEGIS: non-zero INITIAL_PCR0 required");
+        require(initialPCR0High != bytes32(0) || initialPCR0Low != bytes16(0), "AEGIS: non-zero 48-byte INITIAL_PCR0 required");
         require(nitroVKey != bytes32(0), "AEGIS: non-zero NITRO_VKEY required");
 
         address[5] memory guardians = [
@@ -41,7 +42,8 @@ contract DeployAegis is Script {
         AegisSessionRegistry registry = new AegisSessionRegistry(
             sp1Gateway,
             nitroVKey,
-            initialPCR0,
+            initialPCR0High,
+            initialPCR0Low,
             address(council),
             address(council)
         );

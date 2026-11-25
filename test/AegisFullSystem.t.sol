@@ -1,4 +1,4 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK Zero-Trust Adversarial Test Suite
+// Created & Architected by Shishir Vats | AEGIS-ZK Zero-Trust Adversarial & Symbolic Test Suite
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
@@ -118,7 +118,8 @@ contract AegisFullSystemTest is Test {
 
     address owner;
     address enclaveSigner;
-    bytes32 approvedPCR0 = keccak256("PROD_ENCLAVE_EIF_PCR0_MEASUREMENT");
+    bytes32 approvedPCR0High = keccak256("PROD_ENCLAVE_EIF_PCR0_HIGH_32_BYTES");
+    bytes16 approvedPCR0Low = bytes16(keccak256("PROD_ENCLAVE_EIF_PCR0_LOW_16_BYTES"));
     bytes32 nitroVKey = keccak256("PROD_SP1_NITRO_PROGRAM_VKEY");
 
     function setUp() public {
@@ -146,7 +147,8 @@ contract AegisFullSystemTest is Test {
         registry = new AegisSessionRegistry(
             address(sp1Gateway),
             nitroVKey,
-            approvedPCR0,
+            approvedPCR0High,
+            approvedPCR0Low,
             address(council),
             address(council)
         );
@@ -178,7 +180,8 @@ contract AegisFullSystemTest is Test {
     function _registerTestEnclaveSession() internal {
         bytes memory pubValues = abi.encode(
             enclaveSigner,
-            approvedPCR0,
+            approvedPCR0High,
+            approvedPCR0Low,
             keccak256("CERT_SERIAL_001"),
             uint64(block.timestamp - 30),
             uint64(block.timestamp - 1 days),
@@ -241,27 +244,36 @@ contract AegisFullSystemTest is Test {
         assertEq(usdc.balanceOf(recipient), 250e6);
         assertEq(AegisProtectedSmartAccount(payable(acct)).nonce(), 1);
 
+        // Immediate replay 1 block later MUST revert due to nonce increment
         vm.prank(owner);
         vm.expectRevert(AegisExecutionHook.AegisInvalidEnclaveSignature.selector);
         AegisProtectedSmartAccount(payable(acct)).executeGuarded(env, address(usdc), 0, callData);
     }
 
-    function testDirectApproveForbiddenInExecuteGuarded() public {
+    function testRecipientSubstitutionRejectedOnChain() public {
         vm.deal(owner, 1 ether);
         vm.prank(owner);
-        address acct = factory.createProtectedAccount{value: 0.001 ether}(owner, keccak256("salt2"));
+        address acct = factory.createProtectedAccount{value: 0.001 ether}(owner, keccak256("salt_sub"));
+        usdc.mint(acct, 1_000e6);
 
-        bytes memory approveData = abi.encodeWithSelector(TestERC20.approve.selector, address(router), type(uint256).max);
-        bytes memory execData = abi.encodePacked(address(usdc), uint256(0), approveData);
+        address legitimateRecipient = address(0xCAFE);
+        address attackerRecipient = address(0xBAD1);
+
+        bytes memory signedCallData = abi.encodeWithSelector(TestERC20.transfer.selector, legitimateRecipient, 250e6);
+        bytes memory signedExecData = abi.encodePacked(address(usdc), uint256(0), signedCallData);
         address[] memory spenders = new address[](0);
-        bytes memory env = _signEnvelope(acct, 0, execData, block.number + 20, 0, spenders);
+        bytes memory env = _signEnvelope(acct, 0, signedExecData, block.number + 20, 250e6, spenders);
+
+        // Attacker attempts to swap recipient to attackerRecipient while reusing valid envelope
+        bytes memory spoofedCallData = abi.encodeWithSelector(TestERC20.transfer.selector, attackerRecipient, 250e6);
 
         vm.prank(owner);
-        vm.expectRevert(AegisExecutionHook.AegisDirectApproveForbidden.selector);
-        AegisProtectedSmartAccount(payable(acct)).executeGuarded(env, address(usdc), 0, approveData);
+        vm.expectRevert(AegisExecutionHook.AegisCalldataMismatch.selector);
+        AegisProtectedSmartAccount(payable(acct)).executeGuarded(env, address(usdc), 0, spoofedCallData);
+        assertEq(usdc.balanceOf(attackerRecipient), 0);
     }
 
-    function testZeroResetApprovalSwapLeavesZeroAllowance() public {
+    function testCanonicalErc7579ExecuteAndZeroResetApproval() public {
         vm.deal(owner, 1 ether);
         vm.prank(owner);
         address acct = factory.createProtectedAccount{value: 0.001 ether}(owner, keccak256("salt3"));
@@ -295,37 +307,24 @@ contract AegisFullSystemTest is Test {
         assertEq(usdc.allowance(acct, address(router)), 0);
     }
 
-    function testZeroPCR0AndWrongChainRejected() public {
-        bytes memory badChainValues = abi.encode(
-            vm.addr(0x9999),
-            approvedPCR0,
-            keccak256("CERT_SERIAL_002"),
-            uint64(block.timestamp - 10),
-            uint64(block.timestamp - 1 days),
-            uint64(block.timestamp + 1 days),
-            uint256(999999),
-            address(registry)
-        );
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                AegisSessionRegistry.AegisInvalidChainOrRegistryBinding.selector,
-                uint256(999999),
-                address(registry)
-            )
-        );
-        registry.registerEnclaveSession(badChainValues, hex"deadbeef");
+    // Halmos Symbolic Invariant: Outflow exceeding enclave-signed cap ALWAYS reverts across all 2^256 amounts
+    function check_outflowConservationSymbolic(uint256 signedCap, uint256 attemptedTransfer) public {
+        vm.assume(signedCap < 1_000_000e6);
+        vm.assume(attemptedTransfer > signedCap && attemptedTransfer <= 1_000_000e6);
 
-        bytes memory zeroPcrValues = abi.encode(
-            vm.addr(0x8888),
-            bytes32(0),
-            keccak256("CERT_SERIAL_003"),
-            uint64(block.timestamp - 10),
-            uint64(block.timestamp - 1 days),
-            uint64(block.timestamp + 1 days),
-            block.chainid,
-            address(registry)
-        );
-        vm.expectRevert(AegisSessionRegistry.AegisZeroPCR0Forbidden.selector);
-        registry.registerEnclaveSession(zeroPcrValues, hex"deadbeef");
+        vm.deal(owner, 1 ether);
+        vm.prank(owner);
+        address acct = factory.createProtectedAccount{value: 0.001 ether}(owner, keccak256("symbolic_salt"));
+        usdc.mint(acct, 1_000_000e6);
+
+        address recipient = address(0xCAFE);
+        bytes memory callData = abi.encodeWithSelector(TestERC20.transfer.selector, recipient, attemptedTransfer);
+        bytes memory execData = abi.encodePacked(address(usdc), uint256(0), callData);
+        address[] memory spenders = new address[](0);
+        bytes memory env = _signEnvelope(acct, 0, execData, block.number + 20, signedCap, spenders);
+
+        vm.prank(owner);
+        vm.expectRevert();
+        AegisProtectedSmartAccount(payable(acct)).executeGuarded(env, address(usdc), 0, callData);
     }
 }

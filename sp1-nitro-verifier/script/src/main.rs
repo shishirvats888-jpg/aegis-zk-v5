@@ -1,4 +1,4 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK SP1 Host Prover (v5.2 Chain-Bound)
+// Created & Architected by Shishir Vats | AEGIS-ZK SP1 Host Prover (v5.2 Full 48-Byte SHA-384)
 use alloy_primitives::{Address, U256};
 use alloy_sol_types::{sol, SolValue};
 use sp1_sdk::{include_elf, HashableKey, ProverClient, SP1Stdin};
@@ -9,7 +9,8 @@ pub const NITRO_VERIFIER_ELF: &[u8] = include_elf!("aegis-nitro-verifier");
 sol! {
     struct AttestationPublicValues {
         address pubKeyEnclave;
-        bytes32 pcr0;
+        bytes32 pcr0High;
+        bytes16 pcr0Low;
         bytes32 certSerial;
         uint64 attestationTimestamp;
         uint64 minCertNotBefore;
@@ -43,7 +44,7 @@ fn main() {
         .expect("ENCLAVE_PUBKEY must be 20 bytes");
 
     let chain_id: u64 = std::env::var("BOUND_CHAIN_ID")
-        .expect("Set BOUND_CHAIN_ID (e.g. 84532 for Base Sepolia or 8453 for Base)")
+        .expect("Set BOUND_CHAIN_ID (e.g. 84532 for Base Sepolia or 8453 for Base Mainnet)")
         .parse()
         .expect("Invalid BOUND_CHAIN_ID");
     let chain_id_bytes: [u8; 32] = U256::from(chain_id).to_be_bytes();
@@ -72,13 +73,14 @@ fn main() {
         .expect("Local SP1 Groth16 proof verification failed");
 
     let decoded = AttestationPublicValues::abi_decode(proof.public_values.as_slice(), true)
-        .expect("Failed to decode 256-byte Solidity AttestationPublicValues");
+        .expect("Failed to decode 288-byte Solidity AttestationPublicValues");
 
     assert_eq!(decoded.pubKeyEnclave, Address::from(pub_key_bytes));
     assert_eq!(decoded.boundRegistry, Address::from(registry_bytes));
 
     println!("VERIFIED_ENCLAVE_SIGNER={}", decoded.pubKeyEnclave);
-    println!("VERIFIED_PCR0=0x{}", hex::encode(decoded.pcr0));
+    println!("VERIFIED_PCR0_HIGH=0x{}", hex::encode(decoded.pcr0High));
+    println!("VERIFIED_PCR0_LOW=0x{}", hex::encode(decoded.pcr0Low));
     println!("VERIFIED_CERT_SERIAL=0x{}", hex::encode(decoded.certSerial));
     println!("VERIFIED_ATTESTATION_TS={}", decoded.attestationTimestamp);
     println!("PUBLIC_VALUES=0x{}", hex::encode(proof.public_values.as_slice()));

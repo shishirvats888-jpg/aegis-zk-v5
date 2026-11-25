@@ -77,6 +77,7 @@ contract AegisExecutionHook {
     error AegisNonDefaultExecTypeForbidden();
     error AegisSelfCallForbidden();
     error AegisDirectApproveForbidden();
+    error AegisCalldataMismatch();
     error AegisUnauthorizedModuleMutation();
     error AegisInvalidPaymaster();
     error AegisGasPriceExceeded();
@@ -103,6 +104,10 @@ contract AegisExecutionHook {
         }
     }
 
+    function canonicalTokensLength() external view returns (uint256) {
+        return canonicalTokens.length;
+    }
+
     function setDailyOutflowCap(address account, address asset, uint256 maxDailyOutflow) external {
         require(msg.sender == account || msg.sender == governanceTimelock, "Aegis: unauthorized cap setter");
         dailyOutflowCap[account][asset] = maxDailyOutflow;
@@ -111,6 +116,7 @@ contract AegisExecutionHook {
 
     function validateUserOpGuard(PackedUserOperation calldata userOp, bytes32 userOpHash, uint256 validUntilBlock, bytes32 maxOutflowHash, bytes calldata enclaveSignature) external view returns (bool) {
         if (address(securityCouncil) != address(0) && securityCouncil.globalPaused()) revert AegisProtocolPaused();
+        if (block.number > validUntilBlock) revert AegisExpiredSignature(block.number, validUntilBlock);
         if (userOp.paymasterAndData.length < 20 || address(bytes20(userOp.paymasterAndData[:20])) != approvedPaymaster) revert AegisInvalidPaymaster();
         if (tx.gasprice > maxAllowedGasPrice) revert AegisGasPriceExceeded();
 
@@ -134,6 +140,8 @@ contract AegisExecutionHook {
         _hookLock = 1;
 
         address account = msg.sender;
+        (bytes memory hookEnvelope, bytes32 actualPackedCallHash) = abi.decode(msgData, (bytes, bytes32));
+
         (
             bytes32 mode,
             bytes memory executionCalldata,
@@ -142,8 +150,10 @@ contract AegisExecutionHook {
             uint256[] memory signedMaxOutflowTokens,
             address[] memory spendersToVerifyZero,
             bytes memory enclaveSignature
-        ) = abi.decode(msgData, (bytes32, bytes, uint256, uint256, uint256[], address[], bytes));
+        ) = abi.decode(hookEnvelope, (bytes32, bytes, uint256, uint256, uint256[], address[], bytes));
 
+        // Cryptographically bind executed (target, value, callData) to signed executionCalldata
+        if (keccak256(executionCalldata) != actualPackedCallHash) revert AegisCalldataMismatch();
         if (block.number > validUntilBlock) revert AegisExpiredSignature(block.number, validUntilBlock);
         if (signedMaxOutflowTokens.length != canonicalTokens.length) revert AegisArrayLengthMismatch();
 
@@ -220,7 +230,7 @@ contract AegisExecutionHook {
 
     function _assertNoSelfOrDirectApproveCalls(address account, bytes1 callType, bytes memory executionCalldata) internal pure {
         if (callType == CALLTYPE_SINGLE) {
-            require(executionCalldata.length >= 20, "Aegis: short single calldata");
+            require(executionCalldata.length >= 52, "Aegis: short packed single calldata");
             address target;
             assembly { target := shr(96, mload(add(executionCalldata, 32))) }
             if (target == account) revert AegisSelfCallForbidden();
@@ -274,4 +284,3 @@ contract AegisExecutionHook {
         return signer;
     }
 }
-
