@@ -117,7 +117,7 @@ contract AegisSessionRegistry {
             revert AegisInvalidPCR0(pcr0High, pcr0Low, latestApprovedPCR0High, latestApprovedPCR0Low);
         }
         if (usedCertSerials[certSerial] || revokedCertSerials[certSerial]) revert AegisCertSerialReplayOrRevoked(certSerial);
-        if (attestationTimestamp > block.timestamp + 60 || block.timestamp - attestationTimestamp > MAX_ATTESTATION_AGE) {
+        if (attestationTimestamp > block.timestamp + 60 || (block.timestamp > attestationTimestamp && block.timestamp - attestationTimestamp > MAX_ATTESTATION_AGE)) {
             revert AegisStaleAttestation(attestationTimestamp, block.timestamp);
         }
         if (block.timestamp < minCertNotBefore || block.timestamp > maxCertNotAfter) {
