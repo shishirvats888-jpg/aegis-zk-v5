@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
+import "./interfaces/PackedUserOperation.sol";
+
 interface IERC20 {
     function balanceOf(address account) external view returns (uint256);
     function allowance(address owner, address spender) external view returns (uint256);
@@ -22,18 +24,6 @@ interface ISecurityCouncilHook {
 
 interface IAegisAccountNonce {
     function nonce() external view returns (uint256);
-}
-
-struct PackedUserOperation {
-    address sender;
-    uint256 nonce;
-    bytes initCode;
-    bytes callData;
-    bytes32 accountGasLimits;
-    uint256 preVerificationGas;
-    bytes32 gasFees;
-    bytes paymasterAndData;
-    bytes signature;
 }
 
 contract AegisExecutionHook {
@@ -137,6 +127,7 @@ contract AegisExecutionHook {
         if (!sessionRegistry.isValidEnclaveSigner(recovered)) revert AegisInvalidEnclaveSignature();
         return true;
     }
+
     function preCheck(address msgSender, uint256, bytes calldata msgData) external returns (bytes memory hookData) {
         if (address(securityCouncil) != address(0) && securityCouncil.globalPaused()) revert AegisProtocolPaused();
         if (_hookLock != 0) revert AegisNestedExecutionForbidden();
@@ -156,7 +147,6 @@ contract AegisExecutionHook {
         if (block.number > validUntilBlock) revert AegisExpiredSignature(block.number, validUntilBlock);
         if (signedMaxOutflowTokens.length != canonicalTokens.length) revert AegisArrayLengthMismatch();
 
-        // Bind account.nonce() into enclave digest to eliminate any intra-window replay
         uint256 accountNonce = IAegisAccountNonce(account).nonce();
         bytes32 envelopeCoreHash = keccak256(
             abi.encode(mode, executionCalldata, validUntilBlock, signedMaxOutflowEth, signedMaxOutflowTokens, spendersToVerifyZero)
@@ -284,3 +274,4 @@ contract AegisExecutionHook {
         return signer;
     }
 }
+

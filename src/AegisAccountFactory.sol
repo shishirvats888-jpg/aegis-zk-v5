@@ -2,17 +2,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-struct PackedUserOperation {
-    address sender;
-    uint256 nonce;
-    bytes initCode;
-    bytes callData;
-    bytes32 accountGasLimits;
-    uint256 preVerificationGas;
-    bytes32 gasFees;
-    bytes paymasterAndData;
-    bytes signature;
-}
+import "./interfaces/PackedUserOperation.sol";
 
 interface IAegisHookModule {
     function preCheck(address msgSender, uint256 value, bytes calldata msgData) external returns (bytes memory);
