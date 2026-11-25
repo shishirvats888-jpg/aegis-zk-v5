@@ -11,7 +11,7 @@ fn main() {
         panic!("Usage: aegis-nsm-attestation <72-byte-user-data-hex> <output-cbor-path>");
     }
 
-    let user_data_bytes = hex::decode(args.trim_start_matches("0x"))
+    let user_data_bytes = hex::decode(args[1].trim_start_matches("0x"))
         .expect("Invalid 72-byte user_data hex");
     assert_eq!(
         user_data_bytes.len(),
@@ -33,9 +33,9 @@ fn main() {
 
     match response {
         Response::Attestation { document } => {
-            fs::write(&args, &document)
-                .unwrap_or_else(|e| panic!("Failed to write CBOR attestation to {}: {}", args, e));
-            println!("AEGIS_NSM_ATTESTATION_WRITTEN={} bytes={}", args, document.len());
+            fs::write(&args[2], &document)
+                .unwrap_or_else(|e| panic!("Failed to write CBOR attestation to {}: {}", args[2], e));
+            println!("AEGIS_NSM_ATTESTATION_WRITTEN={} bytes={}", args[2], document.len());
         }
         other => panic!("Unexpected /dev/nsm response: {:?}", other),
     }
