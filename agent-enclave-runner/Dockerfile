@@ -11,6 +11,6 @@ COPY --from=nsm-builder /build/target/release/aegis-nsm-attestation /usr/local/b
 COPY package.json server.ts ./
 RUN npm install --omit=dev
 RUN mkdir -p /opt/aegis/models && \
-    curl -L -o /opt/aegis/models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
+    curl -fSL -o /opt/aegis/models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
     https://huggingface.co
 CMD ["npm", "start"]
