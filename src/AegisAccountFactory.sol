@@ -216,6 +216,7 @@ contract AegisProtectedSmartAccount {
 
         if (IERC20Account(token).allowance(address(this), spender) != 0) {
             _safeApprove(token, spender, 0);
+        if (IERC20Account(token).allowance(address(this), spender) != 0) revert AegisApproveFailed();
         }
         _safeApprove(token, spender, exactAmount);
 
