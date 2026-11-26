@@ -146,7 +146,7 @@ contract AegisProtectedSmartAccount {
                 if (!ok) {
                     assembly { revert(add(ret, 32), mload(ret)) }
                 }
-                results = ret;
+                results[0] = ret;
             }
         } else if (callType == CALLTYPE_BATCH) {
             Execution[] memory execs = abi.decode(innerExecutionData, (Execution[]));

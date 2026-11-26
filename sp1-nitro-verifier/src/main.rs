@@ -51,15 +51,15 @@ pub fn main() {
         _ => panic!("AEGIS_SP1: outer COSE_Sign1 must be a 4-element array"),
     };
 
-    let protected_bytes = match &cose_arr {
+    let protected_bytes = match &cose_arr[0] {
         Value::Bytes(b) => b.clone(),
         _ => panic!("AEGIS_SP1: COSE protected header must be bytes"),
     };
-    let payload_bytes = match &cose_arr {
+    let payload_bytes = match &cose_arr[2] {
         Value::Bytes(b) => b.clone(),
         _ => panic!("AEGIS_SP1: COSE payload must be bytes"),
     };
-    let cose_sig_bytes = match &cose_arr {
+    let cose_sig_bytes = match &cose_arr[3] {
         Value::Bytes(b) => b.clone(),
         _ => panic!("AEGIS_SP1: COSE signature must be bytes"),
     };
@@ -160,7 +160,7 @@ pub fn main() {
         "AEGIS_SP1: user_data mismatch against (pubKeyEnclave || chainId || registry)"
     );
 
-    let root_hash = Sha256::digest(&cabundle);
+    let root_hash = Sha256::digest(&cabundle[0]);
     assert_eq!(
         root_hash.as_slice(),
         &AWS_NITRO_ROOT_G1_SHA256,
@@ -171,7 +171,7 @@ pub fn main() {
     let mut max_not_after: u64 = u64::MAX;
 
     let (_, root_cert) =
-        X509Certificate::from_der(&cabundle).expect("AEGIS_SP1: invalid root DER");
+        X509Certificate::from_der(&cabundle[0]).expect("AEGIS_SP1: invalid root DER");
     assert_ca_cert_constraints(&root_cert);
     update_validity_bounds(&root_cert, &mut min_not_before, &mut max_not_after);
 
