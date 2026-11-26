@@ -84,7 +84,7 @@ export default function AegisBreakTheAgent() {
 
   const publicClient = createPublicClient({
     chain: baseSepolia,
-    transport: http(process.env.NEXT_PUBLIC_BASE_SEPOLIA_RPC || 'https://base.org'),
+    transport: http(process.env.NEXT_PUBLIC_BASE_SEPOLIA_RPC || 'https://sepolia.base.org'),
   });
 
   const getWallet = async () => {
@@ -141,7 +141,7 @@ export default function AegisBreakTheAgent() {
         setLogs((p) => [
           ...p,
           `[DEPLOYED SMART ACCOUNT]: ${deployedAddr} (nonce: 0)`,
-          `[TX CONFIRMED]: https://basescan.org{hash}`,
+          `[TX CONFIRMED]: https://sepolia.basescan.org/tx/${hash}`,
         ]);
       }
     } catch (err: any) {
@@ -226,7 +226,7 @@ export default function AegisBreakTheAgent() {
       setLogs((p) => [
         ...p,
         `[Layer 3 ERC-7579 postCheck PASSED]: On-chain balance conserved & allowanceAfter == 0 (new nonce: ${updatedNonce}).`,
-        `[BASE SEPOLIA TX]: https://basescan.org{txHash}`,
+        `[BASE SEPOLIA TX]: https://sepolia.basescan.org/tx/${txHash}`,
       ]);
     } catch (err: any) {
       setLogs((p) => [
