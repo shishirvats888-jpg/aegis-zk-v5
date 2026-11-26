@@ -1,4 +1,4 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK (v5.2 Zero-Trust Full SHA-384 Edition)
+// Created & Architected by Shishir Vats | AEGIS-ZK (v5.3 Hardened Full SHA-384 Edition)
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
@@ -20,6 +20,7 @@ contract DeployAegis is Script {
         address usdcToken = vm.envAddress("USDC_ADDRESS");
         address paymaster = vm.envAddress("PAYMASTER_ADDRESS");
         address sequencerUptimeFeed = vm.envAddress("SEQUENCER_UPTIME_FEED");
+        uint256 maxAllowedGasPrice = vm.envOr("MAX_ALLOWED_GAS_PRICE", uint256(100 gwei));
 
         bytes32 initialPCR0High = vm.envBytes32("INITIAL_PCR0_HIGH");
         bytes16 initialPCR0Low = bytes16(vm.envBytes32("INITIAL_PCR0_LOW"));
@@ -57,7 +58,7 @@ contract DeployAegis is Script {
             address(council),
             paymaster,
             address(council),
-            100 gwei,
+            maxAllowedGasPrice,
             canonicalTokens
         );
         AegisAccountFactory factory = new AegisAccountFactory(

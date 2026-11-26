@@ -1,4 +1,4 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK (v5.2 Zero-Trust Edition)
+// Created & Architected by Shishir Vats | AEGIS-ZK (v5.3 Hardened Zero-Trust Edition)
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
@@ -12,13 +12,18 @@ interface ISecurityCouncilVault {
     function globalPaused() external view returns (bool);
 }
 
+interface IAegisFactoryVault {
+    function isAegisAccount(address account) external view returns (bool);
+}
+
 contract AegisUnderwritingVault {
     string public constant PROTOCOL_AUTHOR = "Shishir Vats";
-    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
+    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.3-SHISHIR-VATS";
 
     IERC20Vault public immutable usdc;
     ISecurityCouncilVault public immutable securityCouncil;
     address public immutable governanceTimelock;
+    IAegisFactoryVault public accountFactory;
 
     uint256 public constant EPOCH_DURATION = 7 days;
     uint256 public constant GRACE_PERIOD = 24 hours;
@@ -26,6 +31,7 @@ contract AegisUnderwritingVault {
     uint256 public constant MAX_EPOCH_CAP_BPS = 1000;
     uint256 public constant FIRST_LOSS_BPS = 2000;
     uint256 public constant BPS_DENOMINATOR = 10_000;
+    uint256 public constant VIRTUAL_OFFSET = 1e3;
 
     uint256 public totalLpAssets;
     uint256 public totalShares;
@@ -34,6 +40,7 @@ contract AegisUnderwritingVault {
 
     uint256 public currentEpoch;
     uint256 public currentEpochStart;
+    uint256 private _reentrancyLock = 1;
 
     struct EpochInfo {
         uint256 startTime;
@@ -69,6 +76,7 @@ contract AegisUnderwritingVault {
     mapping(uint256 => Claim) public claims;
     uint256 public nextClaimId = 1;
 
+    event AccountFactoryUpdated(address indexed factory);
     event LpDeposited(address indexed lp, uint256 assets, uint256 shares);
     event LpWithdrawalQueued(address indexed lp, uint256 shares, uint256 unlockEpoch);
     event LpWithdrawn(address indexed lp, uint256 shares, uint256 assets);
@@ -80,10 +88,15 @@ contract AegisUnderwritingVault {
     event ClaimSettled(uint256 indexed claimId, address indexed claimant, uint256 totalPaid);
 
     error AegisProtocolPaused();
+    error AegisReentrancy();
     error AegisZeroAmount();
+    error AegisZeroShares();
     error AegisInsufficientShares();
+    error AegisWithdrawalAlreadyQueued();
     error AegisWithdrawalLocked(uint256 currentEpoch, uint256 unlockEpoch);
     error AegisInsufficientOperatorBond(uint256 required, uint256 provided);
+    error AegisInvalidEpochId(uint256 epochId);
+    error AegisInvalidClaimant(address claimant);
     error AegisGracePeriodClosed();
     error AegisDisputeWindowActive();
     error AegisDisputeWindowClosed();
@@ -93,6 +106,13 @@ contract AegisUnderwritingVault {
     error AegisClaimDisputed();
     error AegisUnauthorized();
     error AegisSolvencyViolation();
+
+    modifier nonReentrant() {
+        if (_reentrancyLock != 1) revert AegisReentrancy();
+        _reentrancyLock = 2;
+        _;
+        _reentrancyLock = 1;
+    }
 
     modifier onlyGovernance() {
         if (msg.sender != governanceTimelock) revert AegisUnauthorized();
@@ -114,33 +134,50 @@ contract AegisUnderwritingVault {
         epochs[1] = EpochInfo(block.timestamp, block.timestamp + EPOCH_DURATION, 0, 0, 0, 0, false);
     }
 
-    function depositLp(uint256 assets) external whenNotPaused returns (uint256 shares) {
+    function setAccountFactory(address _factory) external onlyGovernance {
+        accountFactory = IAegisFactoryVault(_factory);
+        emit AccountFactoryUpdated(_factory);
+    }
+
+    function _pullUsdcExact(address from, uint256 amount) internal returns (uint256 received) {
+        uint256 balBefore = usdc.balanceOf(address(this));
+        require(usdc.transferFrom(from, address(this), amount), "Vault: transferFrom failed");
+        uint256 balAfter = usdc.balanceOf(address(this));
+        received = balAfter - balBefore;
+        if (received == 0) revert AegisZeroAmount();
+    }
+
+    function depositLp(uint256 assets) external nonReentrant whenNotPaused returns (uint256 shares) {
         if (assets == 0) revert AegisZeroAmount();
         _rollEpochIfNeeded();
-        shares = (totalShares == 0 || totalLpAssets == 0) ? assets : (assets * totalShares) / totalLpAssets;
-        require(usdc.transferFrom(msg.sender, address(this), assets), "Vault: transferFrom failed");
-        totalLpAssets += assets;
+        uint256 received = _pullUsdcExact(msg.sender, assets);
+
+        shares = (received * (totalShares + VIRTUAL_OFFSET)) / (totalLpAssets + VIRTUAL_OFFSET);
+        if (shares == 0) revert AegisZeroShares();
+
+        totalLpAssets += received;
         totalShares += shares;
         lpShares[msg.sender] += shares;
 
         EpochInfo storage ep = epochs[currentEpoch];
-        if (ep.totalValidClaimed == 0 && ep.availableTVLAtStart == 0) {
+        if (!ep.finalized && ep.totalValidClaimed == 0) {
             uint256 avail = availableTVL();
             ep.availableTVLAtStart = avail;
             ep.maxCapAmount = (avail * MAX_EPOCH_CAP_BPS) / BPS_DENOMINATOR;
         }
-        emit LpDeposited(msg.sender, assets, shares);
+        emit LpDeposited(msg.sender, received, shares);
     }
 
-    function queueWithdrawal(uint256 shares) external whenNotPaused {
+    function queueWithdrawal(uint256 shares) external nonReentrant {
         if (shares == 0) revert AegisZeroAmount();
+        if (withdrawalQueue[msg.sender].shares != 0) revert AegisWithdrawalAlreadyQueued();
         if (lpShares[msg.sender] < shares) revert AegisInsufficientShares();
         _rollEpochIfNeeded();
         withdrawalQueue[msg.sender] = WithdrawalRequest(shares, currentEpoch + 1);
         emit LpWithdrawalQueued(msg.sender, shares, currentEpoch + 1);
     }
 
-    function executeWithdrawal() external whenNotPaused {
+    function executeWithdrawal() external nonReentrant {
         _rollEpochIfNeeded();
         WithdrawalRequest memory req = withdrawalQueue[msg.sender];
         if (req.shares == 0) revert AegisZeroAmount();
@@ -149,7 +186,8 @@ contract AegisUnderwritingVault {
         uint256 prevEpoch = req.unlockEpoch - 1;
         if (!epochs[prevEpoch].finalized && epochs[prevEpoch].totalValidClaimed > 0) revert AegisEpochNotFinalized();
 
-        uint256 assets = (req.shares * totalLpAssets) / totalShares;
+        uint256 assets = (req.shares * (totalLpAssets + VIRTUAL_OFFSET)) / (totalShares + VIRTUAL_OFFSET);
+        if (assets > totalLpAssets) assets = totalLpAssets;
         if (totalLpAssets - assets < encumberedLiquidity) revert AegisSolvencyViolation();
 
         delete withdrawalQueue[msg.sender];
@@ -159,35 +197,51 @@ contract AegisUnderwritingVault {
         require(usdc.transfer(msg.sender, assets), "Vault: transfer failed");
         emit LpWithdrawn(msg.sender, req.shares, assets);
     }
-
-    function postOperatorBond(uint256 bondAmount, uint256 desiredCoverageLimit) external whenNotPaused {
+    function postOperatorBond(uint256 bondAmount, uint256 desiredCoverageLimit) external nonReentrant whenNotPaused {
         uint256 requiredBond = (desiredCoverageLimit * FIRST_LOSS_BPS) / BPS_DENOMINATOR;
         if (bondAmount < requiredBond) revert AegisInsufficientOperatorBond(requiredBond, bondAmount);
-        require(usdc.transferFrom(msg.sender, address(this), bondAmount), "Vault: bond transfer failed");
-        operatorBonds[msg.sender] += bondAmount;
+        uint256 received = _pullUsdcExact(msg.sender, bondAmount);
+        if (received < requiredBond) revert AegisInsufficientOperatorBond(requiredBond, received);
+        operatorBonds[msg.sender] += received;
         operatorCoverageLimit[msg.sender] += desiredCoverageLimit;
-        emit OperatorBondPosted(msg.sender, bondAmount, operatorCoverageLimit[msg.sender]);
+        emit OperatorBondPosted(msg.sender, received, operatorCoverageLimit[msg.sender]);
     }
 
-    function payCoveragePremium(uint256 amount) external whenNotPaused {
+    function payCoveragePremium(uint256 amount) external nonReentrant whenNotPaused {
         if (amount == 0) revert AegisZeroAmount();
-        require(usdc.transferFrom(msg.sender, address(this), amount), "Vault: premium transfer failed");
-        uint256 reserveCut = (amount * 2000) / BPS_DENOMINATOR;
+        uint256 received = _pullUsdcExact(msg.sender, amount);
+        uint256 reserveCut = (received * 2000) / BPS_DENOMINATOR;
         protocolReserve += reserveCut;
-        totalLpAssets += (amount - reserveCut);
-        emit PremiumPaid(msg.sender, amount);
+        totalLpAssets += (received - reserveCut);
+        emit PremiumPaid(msg.sender, received);
     }
 
-    function fileClaim(uint256 epochId, address operator, address claimant, uint256 lossAmount) external whenNotPaused returns (uint256 claimId) {
+    function fileClaim(
+        uint256 epochId,
+        address operator,
+        address claimant,
+        uint256 lossAmount
+    ) external onlyGovernance nonReentrant whenNotPaused returns (uint256 claimId) {
         if (lossAmount == 0) revert AegisZeroAmount();
         _rollEpochIfNeeded();
+        if (epochId == 0 || epochId > currentEpoch) revert AegisInvalidEpochId(epochId);
+        if (address(accountFactory) != address(0) && !accountFactory.isAegisAccount(claimant)) {
+            revert AegisInvalidClaimant(claimant);
+        }
+
         EpochInfo storage ep = epochs[epochId];
-        if (block.timestamp > ep.endTime + GRACE_PERIOD) revert AegisGracePeriodClosed();
+        if (ep.finalized || block.timestamp > ep.endTime + GRACE_PERIOD) revert AegisGracePeriodClosed();
 
         uint256 coveredLoss = lossAmount > operatorCoverageLimit[operator] ? operatorCoverageLimit[operator] : lossAmount;
+        if (coveredLoss == 0) revert AegisZeroAmount();
+
         uint256 bondAvailable = operatorBonds[operator];
         uint256 bondSlashed = coveredLoss <= bondAvailable ? coveredLoss : bondAvailable;
         operatorBonds[operator] -= bondSlashed;
+        uint256 maxRemainingCoverage = (operatorBonds[operator] * BPS_DENOMINATOR) / FIRST_LOSS_BPS;
+        if (operatorCoverageLimit[operator] > maxRemainingCoverage) {
+            operatorCoverageLimit[operator] = maxRemainingCoverage;
+        }
 
         uint256 vaultPortion = coveredLoss - bondSlashed;
         if (vaultPortion > 0) {
@@ -201,8 +255,9 @@ contract AegisUnderwritingVault {
         emit ClaimFiled(claimId, epochId, operator, coveredLoss);
     }
 
-    function disputeSybilClaim(uint256 claimId) external onlyGovernance {
+    function disputeSybilClaim(uint256 claimId) external onlyGovernance nonReentrant {
         Claim storage c = claims[claimId];
+        if (c.epochId == 0) revert AegisInvalidEpochId(0);
         EpochInfo storage ep = epochs[c.epochId];
         if (block.timestamp <= ep.endTime + GRACE_PERIOD) revert AegisDisputeWindowActive();
         if (block.timestamp > ep.endTime + GRACE_PERIOD + DISPUTE_WINDOW) revert AegisDisputeWindowClosed();
@@ -214,21 +269,36 @@ contract AegisUnderwritingVault {
             ep.totalValidClaimed -= c.vaultPortion;
             ep.totalSlashedDisputed += c.vaultPortion;
         }
-        protocolReserve += c.bondSlashed;
+        // Refund wrongfully slashed bond back to the honest operator
+        operatorBonds[c.operator] += c.bondSlashed;
         c.bondSlashed = 0;
         emit ClaimDisputedAndSlashed(claimId, msg.sender);
     }
 
-    function finalizeEpoch(uint256 epochId) external {
+    function finalizeEpoch(uint256 epochId) external nonReentrant {
+        if (epochId == 0 || epochId > currentEpoch) revert AegisInvalidEpochId(epochId);
         EpochInfo storage ep = epochs[epochId];
         if (block.timestamp <= ep.endTime + GRACE_PERIOD + DISPUTE_WINDOW) revert AegisEpochNotReadyForFinalization();
         require(!ep.finalized, "Vault: already finalized");
         ep.finalized = true;
+
+        // Immediately realize approved vault loss at epoch finalization so LP share price reflects the loss before any withdrawal
+        uint256 realizedVaultLoss = ep.totalValidClaimed <= ep.maxCapAmount ? ep.totalValidClaimed : ep.maxCapAmount;
+        if (realizedVaultLoss > 0) {
+            if (protocolReserve >= realizedVaultLoss) {
+                protocolReserve -= realizedVaultLoss;
+            } else {
+                uint256 lpHit = realizedVaultLoss - protocolReserve;
+                protocolReserve = 0;
+                totalLpAssets -= lpHit;
+            }
+        }
         emit EpochFinalized(epochId, ep.totalValidClaimed, ep.maxCapAmount);
     }
 
-    function settleClaim(uint256 claimId) external whenNotPaused {
+    function settleClaim(uint256 claimId) external nonReentrant whenNotPaused {
         Claim storage c = claims[claimId];
+        if (c.epochId == 0) revert AegisInvalidEpochId(0);
         if (c.settled) revert AegisClaimAlreadySettled();
         if (c.disputed) revert AegisClaimDisputed();
         EpochInfo storage ep = epochs[c.epochId];
@@ -241,14 +311,6 @@ contract AegisUnderwritingVault {
             vaultPayout = ep.totalValidClaimed <= ep.maxCapAmount
                 ? c.vaultPortion
                 : (c.vaultPortion * ep.maxCapAmount) / ep.totalValidClaimed;
-
-            if (protocolReserve >= vaultPayout) {
-                protocolReserve -= vaultPayout;
-            } else {
-                uint256 lpHit = vaultPayout - protocolReserve;
-                protocolReserve = 0;
-                totalLpAssets -= lpHit;
-            }
         }
 
         uint256 totalPayout = c.bondSlashed + vaultPayout;
@@ -266,7 +328,15 @@ contract AegisUnderwritingVault {
             uint256 nextEp = currentEpoch + 1;
             uint256 nextStart = epochs[currentEpoch].endTime;
             uint256 avail = availableTVL();
-            epochs[nextEp] = EpochInfo(nextStart, nextStart + EPOCH_DURATION, avail, (avail * MAX_EPOCH_CAP_BPS) / BPS_DENOMINATOR, 0, 0, false);
+            epochs[nextEp] = EpochInfo(
+                nextStart,
+                nextStart + EPOCH_DURATION,
+                avail,
+                (avail * MAX_EPOCH_CAP_BPS) / BPS_DENOMINATOR,
+                0,
+                0,
+                false
+            );
             currentEpoch = nextEp;
             currentEpochStart = nextStart;
         }

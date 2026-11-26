@@ -1,4 +1,4 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK (v5.2 Zero-Trust Edition)
+// Created & Architected by Shishir Vats | AEGIS-ZK (v5.3 Hardened Zero-Trust Edition)
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
@@ -13,7 +13,7 @@ interface IWstETH {
 
 contract AegisOracleGuard {
     string public constant PROTOCOL_AUTHOR = "Shishir Vats";
-    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
+    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.3-SHISHIR-VATS";
 
     address public immutable governanceTimelock;
     IAggregatorV3 public immutable sequencerUptimeFeed;
@@ -33,6 +33,7 @@ contract AegisOracleGuard {
     event TokenFeedConfigured(address indexed token, address indexed feed, address wstEthWrapper, uint256 maxStaleness, uint256 maxDeviationBps);
     error AegisUnauthorized();
     error AegisZeroSequencerFeed();
+    error AegisInvalidFeedConfig();
     error AegisSequencerDown();
     error AegisSequencerGracePeriodNotOver(uint256 elapsed, uint256 required);
     error AegisFeedNotConfigured(address token);
@@ -52,7 +53,16 @@ contract AegisOracleGuard {
         sequencerUptimeFeed = IAggregatorV3(_sequencerUptimeFeed);
     }
 
-    function configureTokenFeed(address token, address chainlinkFeed, address wstEthWrapper, uint256 maxStaleness, uint256 maxDeviationBps) external onlyGovernance {
+    function configureTokenFeed(
+        address token,
+        address chainlinkFeed,
+        address wstEthWrapper,
+        uint256 maxStaleness,
+        uint256 maxDeviationBps
+    ) external onlyGovernance {
+        if (token == address(0) || chainlinkFeed == address(0) || maxStaleness == 0 || maxDeviationBps > BPS_DENOMINATOR) {
+            revert AegisInvalidFeedConfig();
+        }
         tokenFeeds[token] = FeedConfig(chainlinkFeed, wstEthWrapper, maxStaleness, maxDeviationBps, true);
         emit TokenFeedConfigured(token, chainlinkFeed, wstEthWrapper, maxStaleness, maxDeviationBps);
     }
@@ -60,23 +70,27 @@ contract AegisOracleGuard {
     function getValidatedOraclePrice18(address token) public view returns (uint256 price18) {
         (, int256 answer, uint256 startedAt, , ) = sequencerUptimeFeed.latestRoundData();
         if (answer != 0) revert AegisSequencerDown();
-        if (startedAt == 0 || block.timestamp - startedAt <= SEQUENCER_GRACE_PERIOD) {
-            revert AegisSequencerGracePeriodNotOver(startedAt == 0 ? 0 : block.timestamp - startedAt, SEQUENCER_GRACE_PERIOD);
+        if (startedAt == 0 || startedAt > block.timestamp || block.timestamp - startedAt <= SEQUENCER_GRACE_PERIOD) {
+            uint256 elapsed = (startedAt == 0 || startedAt > block.timestamp) ? 0 : block.timestamp - startedAt;
+            revert AegisSequencerGracePeriodNotOver(elapsed, SEQUENCER_GRACE_PERIOD);
         }
 
         FeedConfig memory cfg = tokenFeeds[token];
         if (!cfg.enabled || cfg.chainlinkFeed == address(0)) revert AegisFeedNotConfigured(token);
 
         IAggregatorV3 feed = IAggregatorV3(cfg.chainlinkFeed);
-        (uint80 roundId, int256 rawAnswer, , uint256 updatedAt, uint80 answeredInRound) = feed.latestRoundData();
-        if (rawAnswer <= 0 || answeredInRound < roundId) revert AegisInvalidOracleAnswer(token, rawAnswer);
-        if (updatedAt == 0 || block.timestamp - updatedAt > cfg.maxStaleness) revert AegisStaleOraclePrice(token, updatedAt, cfg.maxStaleness);
+        (, int256 rawAnswer, , uint256 updatedAt, ) = feed.latestRoundData();
+        if (rawAnswer <= 0) revert AegisInvalidOracleAnswer(token, rawAnswer);
+        if (updatedAt == 0 || updatedAt > block.timestamp || block.timestamp - updatedAt > cfg.maxStaleness) {
+            revert AegisStaleOraclePrice(token, updatedAt, cfg.maxStaleness);
+        }
 
         uint8 dec = feed.decimals();
         price18 = dec <= 18 ? uint256(rawAnswer) * (10 ** (18 - dec)) : uint256(rawAnswer) / (10 ** (dec - 18));
 
         if (cfg.wstEthWrapper != address(0)) {
             uint256 stEthPerToken = IWstETH(cfg.wstEthWrapper).stEthPerToken();
+            if (stEthPerToken == 0) revert AegisInvalidOracleAnswer(token, 0);
             price18 = (price18 * stEthPerToken) / 1e18;
         }
     }

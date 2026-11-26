@@ -1,4 +1,4 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK SP1 Nitro Verifier (v5.2 Full 48-Byte SHA-384 P-384)
+// Created & Architected by Shishir Vats | AEGIS-ZK SP1 Nitro Verifier (v5.3 Hardened 48-Byte SHA-384 P-384)
 #![no_main]
 sp1_zkvm::entrypoint!(main);
 
@@ -16,6 +16,9 @@ const AWS_NITRO_ROOT_G1_SHA256: [u8; 32] = [
     0x7e, 0xd7, 0xcd, 0xcc, 0x3c, 0x17, 0x56, 0xe0,
     0x98, 0x93, 0xf3, 0xc6, 0x8f, 0x79, 0xbb, 0x5b,
 ];
+
+// OID 1.2.840.10045.4.3.3 (ecdsa-with-SHA384)
+const OID_ECDSA_WITH_SHA384: &str = "1.2.840.10045.4.3.3";
 
 sol! {
     struct AttestationPublicValues {
@@ -48,23 +51,24 @@ pub fn main() {
         _ => panic!("AEGIS_SP1: outer COSE_Sign1 must be a 4-element array"),
     };
 
-    let protected_bytes = match &cose_arr[0] {
+    let protected_bytes = match &cose_arr {
         Value::Bytes(b) => b.clone(),
         _ => panic!("AEGIS_SP1: COSE protected header must be bytes"),
     };
-    let payload_bytes = match &cose_arr[2] {
+    let payload_bytes = match &cose_arr {
         Value::Bytes(b) => b.clone(),
         _ => panic!("AEGIS_SP1: COSE payload must be bytes"),
     };
-    let cose_sig_bytes = match &cose_arr[3] {
+    let cose_sig_bytes = match &cose_arr {
         Value::Bytes(b) => b.clone(),
         _ => panic!("AEGIS_SP1: COSE signature must be bytes"),
     };
 
+    assert_cose_es384_protected_header(&protected_bytes);
+
     let payload_val: Value = ciborium::de::from_reader(&payload_bytes[..])
         .expect("AEGIS_SP1: invalid Nitro attestation CBOR payload");
     assert_canonical_cbor(&payload_val);
-
     let entries = match payload_val {
         Value::Map(m) => m,
         _ => panic!("AEGIS_SP1: Nitro payload must be a CBOR map"),
@@ -132,7 +136,7 @@ pub fn main() {
         }
     }
 
-        let pcr0 = pcr0_opt.expect("AEGIS_SP1: missing pcrs in Nitro attestation");
+    let pcr0 = pcr0_opt.expect("AEGIS_SP1: missing pcrs in Nitro attestation");
     assert_ne!(pcr0, [0u8; 48], "AEGIS_SP1: debug-mode all-zero 48-byte PCR0 forbidden");
 
     let mut pcr0_high = [0u8; 32];
@@ -156,7 +160,7 @@ pub fn main() {
         "AEGIS_SP1: user_data mismatch against (pubKeyEnclave || chainId || registry)"
     );
 
-    let root_hash = Sha256::digest(&cabundle[0]);
+    let root_hash = Sha256::digest(&cabundle);
     assert_eq!(
         root_hash.as_slice(),
         &AWS_NITRO_ROOT_G1_SHA256,
@@ -167,18 +171,28 @@ pub fn main() {
     let mut max_not_after: u64 = u64::MAX;
 
     let (_, root_cert) =
-        X509Certificate::from_der(&cabundle[0]).expect("AEGIS_SP1: invalid root DER");
+        X509Certificate::from_der(&cabundle).expect("AEGIS_SP1: invalid root DER");
+    assert_ca_cert_constraints(&root_cert);
     update_validity_bounds(&root_cert, &mut min_not_before, &mut max_not_after);
+
+    let mut current_issuer_subject = root_cert.subject().clone();
     let mut current_issuer_vk = VerifyingKey::from_sec1_bytes(
         root_cert.public_key().subject_public_key.data.as_ref(),
     )
     .expect("AEGIS_SP1: invalid root P-384 public key");
-
     for intermediate_der in cabundle.iter().skip(1) {
         let (_, cert) =
             X509Certificate::from_der(intermediate_der).expect("AEGIS_SP1: invalid intermediate DER");
+        assert_eq!(
+            cert.issuer(),
+            &current_issuer_subject,
+            "AEGIS_SP1: intermediate issuer != parent subject"
+        );
+        assert_ca_cert_constraints(&cert);
         verify_x509_p384_signature(&cert, &current_issuer_vk);
         update_validity_bounds(&cert, &mut min_not_before, &mut max_not_after);
+
+        current_issuer_subject = cert.subject().clone();
         current_issuer_vk = VerifyingKey::from_sec1_bytes(
             cert.public_key().subject_public_key.data.as_ref(),
         )
@@ -187,6 +201,12 @@ pub fn main() {
 
     let (_, leaf_cert) =
         X509Certificate::from_der(&leaf_der).expect("AEGIS_SP1: invalid leaf X.509 DER");
+    assert_eq!(
+        leaf_cert.issuer(),
+        &current_issuer_subject,
+        "AEGIS_SP1: leaf issuer != intermediate subject"
+    );
+    assert!(!leaf_cert.is_ca(), "AEGIS_SP1: leaf cert must not be CA");
     verify_x509_p384_signature(&leaf_cert, &current_issuer_vk);
     update_validity_bounds(&leaf_cert, &mut min_not_before, &mut max_not_after);
 
@@ -230,7 +250,41 @@ pub fn main() {
     sp1_zkvm::io::commit_slice(&public_values.abi_encode());
 }
 
+fn assert_cose_es384_protected_header(protected_bytes: &[u8]) {
+    let header_val: Value = ciborium::de::from_reader(protected_bytes)
+        .expect("AEGIS_SP1: invalid COSE protected header CBOR");
+    let map = match header_val {
+        Value::Map(m) => m,
+        _ => panic!("AEGIS_SP1: COSE protected header must be a CBOR map"),
+    };
+    let mut is_es384 = false;
+    for (k, v) in map {
+        if let (Value::Integer(key_int), Value::Integer(val_int)) = (k, v) {
+            let key_i128: i128 = key_int.into();
+            let val_i128: i128 = val_int.into();
+            if key_i128 == 1 && val_i128 == -35 {
+                is_es384 = true;
+            }
+        }
+    }
+    assert!(is_es384, "AEGIS_SP1: COSE protected header alg must be ES384 (-35)");
+}
+
+fn assert_ca_cert_constraints(cert: &X509Certificate<'_>) {
+    assert!(cert.is_ca(), "AEGIS_SP1: CA certificate missing BasicConstraints CA:TRUE");
+    let ku = cert
+        .key_usage()
+        .expect("AEGIS_SP1: invalid KeyUsage extension")
+        .expect("AEGIS_SP1: CA certificate missing KeyUsage extension");
+    assert!(ku.value.key_cert_sign(), "AEGIS_SP1: CA certificate missing keyCertSign");
+}
+
 fn verify_x509_p384_signature(cert: &X509Certificate<'_>, issuer_vk: &VerifyingKey) {
+    assert_eq!(
+        cert.signature_algorithm.algorithm.to_id_string(),
+        OID_ECDSA_WITH_SHA384,
+        "AEGIS_SP1: X.509 signature algorithm must be ecdsa-with-SHA384"
+    );
     let der_sig = cert.signature_value.data.as_ref();
     let sig = Signature::from_der(der_sig)
         .expect("AEGIS_SP1: X.509 signature is not valid DER ECDSA P-384");
@@ -240,10 +294,11 @@ fn verify_x509_p384_signature(cert: &X509Certificate<'_>, issuer_vk: &VerifyingK
 }
 
 fn update_validity_bounds(cert: &X509Certificate<'_>, min_nb: &mut u64, max_na: &mut u64) {
-    let nb = u64::try_from(cert.validity().not_before.timestamp())
-        .expect("AEGIS_SP1: invalid cert not_before");
-    let na = u64::try_from(cert.validity().not_after.timestamp())
-        .expect("AEGIS_SP1: invalid cert not_after");
+    let nb_raw = cert.validity().not_before.timestamp();
+    let na_raw = cert.validity().not_after.timestamp();
+    assert!(nb_raw >= 0 && na_raw >= 0, "AEGIS_SP1: negative X.509 timestamp");
+    let nb = nb_raw as u64;
+    let na = na_raw as u64;
     if nb > *min_nb {
         *min_nb = nb;
     }

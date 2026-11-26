@@ -1,4 +1,4 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK (v5.2 Zero-Trust Edition)
+// Created & Architected by Shishir Vats | AEGIS-ZK (v5.3 Hardened Zero-Trust Edition)
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
@@ -26,9 +26,13 @@ interface IAegisAccountNonce {
     function nonce() external view returns (uint256);
 }
 
+interface IAegisAccountFactory {
+    function isAegisAccount(address account) external view returns (bool);
+}
+
 contract AegisExecutionHook {
     string public constant PROTOCOL_AUTHOR = "Shishir Vats";
-    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
+    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.3-SHISHIR-VATS";
 
     IAegisSessionRegistry public immutable sessionRegistry;
     IEntryPoint public immutable entryPoint;
@@ -36,6 +40,9 @@ contract AegisExecutionHook {
     address public immutable approvedPaymaster;
     address public immutable governanceTimelock;
     uint256 public immutable maxAllowedGasPrice;
+
+    uint256 public constant MAX_CANONICAL_TOKENS = 16;
+    uint256 public constant MAX_SPENDERS_TO_VERIFY = 16;
 
     bytes1 internal constant CALLTYPE_SINGLE = 0x00;
     bytes1 internal constant CALLTYPE_BATCH = 0x01;
@@ -47,9 +54,12 @@ contract AegisExecutionHook {
     bytes4 internal constant SEL_EXEC_FROM_EXECUTOR = 0xd691c964;
     bytes4 internal constant SEL_ERC20_APPROVE = 0x095ea7b3;
 
+    IAegisAccountFactory public accountFactory;
     mapping(address => bool) public isCanonicalToken;
     address[] public canonicalTokens;
+
     uint256 private transient _hookLock;
+    bytes32 private transient _activeHookContextHash;
 
     struct DailyVelocity {
         uint64 windowStart;
@@ -69,11 +79,17 @@ contract AegisExecutionHook {
         address[] spendersToVerifyZero;
     }
 
+    event AccountFactoryBound(address indexed factory);
     event DailyVelocityCapSet(address indexed account, address indexed asset, uint256 maxDailyOutflow);
 
     error AegisProtocolPaused();
+    error AegisUnauthorizedAccount();
+    error AegisFactoryAlreadyBound();
+    error AegisZeroAddress();
     error AegisNestedExecutionForbidden();
+    error AegisInvalidPostCheckContext();
     error AegisDelegatecallForbidden();
+    error AegisUnsupportedCallType(bytes1 callType);
     error AegisNonDefaultExecTypeForbidden();
     error AegisSelfCallForbidden();
     error AegisDirectApproveForbidden();
@@ -87,10 +103,20 @@ contract AegisExecutionHook {
     error AegisTokenOutflowExceeded(address token, uint256 beforeBal, uint256 afterBal, uint256 maxAllowed);
     error AegisDailyVelocityExceeded(address account, address asset, uint256 attemptedTotal, uint256 dailyCap);
     error AegisNonZeroAllowanceRemaining(address token, address spender, uint256 remaining);
-    error AegisNonCanonicalToken(address token);
     error AegisArrayLengthMismatch();
-
-    constructor(address _sessionRegistry, address _entryPoint, address _securityCouncil, address _approvedPaymaster, address _governanceTimelock, uint256 _maxAllowedGasPrice, address[] memory _canonicalTokens) {
+    error AegisArrayBoundExceeded(uint256 length, uint256 maxAllowed);
+    constructor(
+        address _sessionRegistry,
+        address _entryPoint,
+        address _securityCouncil,
+        address _approvedPaymaster,
+        address _governanceTimelock,
+        uint256 _maxAllowedGasPrice,
+        address[] memory _canonicalTokens
+    ) {
+        if (_canonicalTokens.length > MAX_CANONICAL_TOKENS) {
+            revert AegisArrayBoundExceeded(_canonicalTokens.length, MAX_CANONICAL_TOKENS);
+        }
         sessionRegistry = IAegisSessionRegistry(_sessionRegistry);
         entryPoint = IEntryPoint(_entryPoint);
         securityCouncil = ISecurityCouncilHook(_securityCouncil);
@@ -104,6 +130,13 @@ contract AegisExecutionHook {
         }
     }
 
+    function setAccountFactory(address _factory) external {
+        if (_factory == address(0)) revert AegisZeroAddress();
+        if (address(accountFactory) != address(0)) revert AegisFactoryAlreadyBound();
+        accountFactory = IAegisAccountFactory(_factory);
+        emit AccountFactoryBound(_factory);
+    }
+
     function canonicalTokensLength() external view returns (uint256) {
         return canonicalTokens.length;
     }
@@ -114,20 +147,38 @@ contract AegisExecutionHook {
         emit DailyVelocityCapSet(account, asset, maxDailyOutflow);
     }
 
-    function validateUserOpGuard(PackedUserOperation calldata userOp, bytes32 userOpHash, uint256 validUntilBlock, bytes32 maxOutflowHash, bytes calldata enclaveSignature) external view returns (bool) {
+    function validateUserOpGuard(
+        PackedUserOperation calldata userOp,
+        bytes32 userOpHash,
+        uint256 validUntilBlock,
+        bytes32 maxOutflowHash,
+        bytes calldata enclaveSignature
+    ) external view returns (bool) {
         if (address(securityCouncil) != address(0) && securityCouncil.globalPaused()) revert AegisProtocolPaused();
+        if (address(accountFactory) == address(0) || !accountFactory.isAegisAccount(msg.sender)) {
+            revert AegisUnauthorizedAccount();
+        }
         if (block.number > validUntilBlock) revert AegisExpiredSignature(block.number, validUntilBlock);
-        if (userOp.paymasterAndData.length < 20 || address(bytes20(userOp.paymasterAndData[:20])) != approvedPaymaster) revert AegisInvalidPaymaster();
+        if (userOp.paymasterAndData.length < 20 || address(bytes20(userOp.paymasterAndData[:20])) != approvedPaymaster) {
+            revert AegisInvalidPaymaster();
+        }
         if (tx.gasprice > maxAllowedGasPrice) revert AegisGasPriceExceeded();
 
         if (userOp.callData.length >= 4) {
             bytes4 selector = bytes4(userOp.callData[:4]);
-            if ((selector == SEL_INSTALL_MODULE || selector == SEL_UNINSTALL_MODULE || selector == SEL_EXEC_FROM_EXECUTOR) && msg.sender != governanceTimelock) {
+            if (
+                (selector == SEL_INSTALL_MODULE ||
+                    selector == SEL_UNINSTALL_MODULE ||
+                    selector == SEL_EXEC_FROM_EXECUTOR) &&
+                msg.sender != governanceTimelock
+            ) {
                 revert AegisUnauthorizedModuleMutation();
             }
         }
 
-        bytes32 digest = keccak256(abi.encode(userOpHash, block.chainid, userOp.sender, validUntilBlock, maxOutflowHash));
+        bytes32 digest = keccak256(
+            abi.encode(userOpHash, block.chainid, userOp.sender, userOp.nonce, validUntilBlock, maxOutflowHash)
+        );
         bytes32 ethSignedDigest = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", digest));
         address recovered = _recoverSigner(ethSignedDigest, enclaveSignature);
         if (!sessionRegistry.isValidEnclaveSigner(recovered)) revert AegisInvalidEnclaveSignature();
@@ -136,6 +187,9 @@ contract AegisExecutionHook {
 
     function preCheck(address msgSender, uint256, bytes calldata msgData) external returns (bytes memory hookData) {
         if (address(securityCouncil) != address(0) && securityCouncil.globalPaused()) revert AegisProtocolPaused();
+        if (address(accountFactory) == address(0) || !accountFactory.isAegisAccount(msg.sender)) {
+            revert AegisUnauthorizedAccount();
+        }
         if (_hookLock != 0) revert AegisNestedExecutionForbidden();
         _hookLock = 1;
 
@@ -152,14 +206,23 @@ contract AegisExecutionHook {
             bytes memory enclaveSignature
         ) = abi.decode(hookEnvelope, (bytes32, bytes, uint256, uint256, uint256[], address[], bytes));
 
-        // Cryptographically bind executed (target, value, callData) to signed executionCalldata
         if (keccak256(executionCalldata) != actualPackedCallHash) revert AegisCalldataMismatch();
         if (block.number > validUntilBlock) revert AegisExpiredSignature(block.number, validUntilBlock);
         if (signedMaxOutflowTokens.length != canonicalTokens.length) revert AegisArrayLengthMismatch();
+        if (spendersToVerifyZero.length > MAX_SPENDERS_TO_VERIFY) {
+            revert AegisArrayBoundExceeded(spendersToVerifyZero.length, MAX_SPENDERS_TO_VERIFY);
+        }
 
         uint256 accountNonce = IAegisAccountNonce(account).nonce();
         bytes32 envelopeCoreHash = keccak256(
-            abi.encode(mode, executionCalldata, validUntilBlock, signedMaxOutflowEth, signedMaxOutflowTokens, spendersToVerifyZero)
+            abi.encode(
+                mode,
+                executionCalldata,
+                validUntilBlock,
+                signedMaxOutflowEth,
+                signedMaxOutflowTokens,
+                spendersToVerifyZero
+            )
         );
         bytes32 maxOutflowHash = keccak256(abi.encode(signedMaxOutflowTokens));
         bytes32 rawDigest = keccak256(
@@ -172,6 +235,7 @@ contract AegisExecutionHook {
         bytes1 callType = bytes1(mode);
         bytes1 execType = bytes1(mode << 8);
         if (callType == CALLTYPE_DELEGATECALL) revert AegisDelegatecallForbidden();
+        if (callType != CALLTYPE_SINGLE && callType != CALLTYPE_BATCH) revert AegisUnsupportedCallType(callType);
         if (execType != EXECTYPE_DEFAULT) revert AegisNonDefaultExecTypeForbidden();
         if (msgSender != governanceTimelock) _assertNoSelfOrDirectApproveCalls(account, callType, executionCalldata);
 
@@ -182,11 +246,29 @@ contract AegisExecutionHook {
             tokenBalancesBefore[i] = IERC20(canonicalTokens[i]).balanceOf(account);
         }
 
-        return abi.encode(ExecutionContext(account, validUntilBlock, signedMaxOutflowEth, nativeAndDepositBefore, tokenBalancesBefore, signedMaxOutflowTokens, spendersToVerifyZero));
+        hookData = abi.encode(
+            ExecutionContext(
+                account,
+                validUntilBlock,
+                signedMaxOutflowEth,
+                nativeAndDepositBefore,
+                tokenBalancesBefore,
+                signedMaxOutflowTokens,
+                spendersToVerifyZero
+            )
+        );
+        _activeHookContextHash = keccak256(abi.encode(account, hookData));
     }
-
     function postCheck(bytes calldata hookData) external {
+        if (address(accountFactory) == address(0) || !accountFactory.isAegisAccount(msg.sender)) {
+            revert AegisUnauthorizedAccount();
+        }
+        if (_hookLock != 1 || _activeHookContextHash != keccak256(abi.encode(msg.sender, hookData))) {
+            revert AegisInvalidPostCheckContext();
+        }
+
         ExecutionContext memory ctx = abi.decode(hookData, (ExecutionContext));
+        if (ctx.account != msg.sender) revert AegisInvalidPostCheckContext();
         if (block.number > ctx.validUntilBlock) revert AegisExpiredSignature(block.number, ctx.validUntilBlock);
 
         uint256 nativeAndDepositAfter = ctx.account.balance + entryPoint.balanceOf(ctx.account);
@@ -212,6 +294,7 @@ contract AegisExecutionHook {
                 if (rem != 0) revert AegisNonZeroAllowanceRemaining(token, ctx.spendersToVerifyZero[j], rem);
             }
         }
+        _activeHookContextHash = bytes32(0);
         _hookLock = 0;
     }
 
@@ -232,11 +315,15 @@ contract AegisExecutionHook {
         if (callType == CALLTYPE_SINGLE) {
             require(executionCalldata.length >= 52, "Aegis: short packed single calldata");
             address target;
-            assembly { target := shr(96, mload(add(executionCalldata, 32))) }
+            assembly {
+                target := shr(96, mload(add(executionCalldata, 32)))
+            }
             if (target == account) revert AegisSelfCallForbidden();
             if (executionCalldata.length >= 56) {
                 bytes4 innerSel;
-                assembly { innerSel := mload(add(executionCalldata, 84)) }
+                assembly {
+                    innerSel := mload(add(executionCalldata, 84))
+                }
                 if (innerSel == SEL_ERC20_APPROVE) revert AegisDirectApproveForbidden();
             }
         } else if (callType == CALLTYPE_BATCH) {
@@ -250,17 +337,25 @@ contract AegisExecutionHook {
         }
     }
 
-    struct Execution { address target; uint256 value; bytes callData; }
+    struct Execution {
+        address target;
+        uint256 value;
+        bytes callData;
+    }
 
     function _recoverSigner(bytes32 digest, bytes calldata sig) internal pure returns (address) {
         if (sig.length != 65) revert AegisInvalidEnclaveSignature();
-        bytes32 r; bytes32 s; uint8 v;
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
         assembly {
             r := calldataload(sig.offset)
             s := calldataload(add(sig.offset, 32))
             v := byte(0, calldataload(add(sig.offset, 64)))
         }
-        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) revert AegisInvalidEnclaveSignature();
+        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
+            revert AegisInvalidEnclaveSignature();
+        }
         if (v < 27) v += 27;
         if (v != 27 && v != 28) revert AegisInvalidEnclaveSignature();
         address signer = ecrecover(digest, v, r, s);
@@ -270,13 +365,17 @@ contract AegisExecutionHook {
 
     function _recoverSignerMemory(bytes32 digest, bytes memory sig) internal pure returns (address) {
         if (sig.length != 65) revert AegisInvalidEnclaveSignature();
-        bytes32 r; bytes32 s; uint8 v;
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
         assembly {
             r := mload(add(sig, 32))
             s := mload(add(sig, 64))
             v := byte(0, mload(add(sig, 96)))
         }
-        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) revert AegisInvalidEnclaveSignature();
+        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
+            revert AegisInvalidEnclaveSignature();
+        }
         if (v < 27) v += 27;
         if (v != 27 && v != 28) revert AegisInvalidEnclaveSignature();
         address signer = ecrecover(digest, v, r, s);

@@ -1,4 +1,4 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK Zero-Trust Adversarial & Symbolic Test Suite
+// Created & Architected by Shishir Vats | AEGIS-ZK Hardened Adversarial & Symbolic Test Suite
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
@@ -127,7 +127,7 @@ contract AegisFullSystemTest is Test {
         owner = vm.addr(ownerPk);
         enclaveSigner = vm.addr(enclavePk);
 
-        address[5] memory guardians = [
+        address memory guardians = [
             vm.addr(guardian1Pk),
             vm.addr(guardian2Pk),
             vm.addr(guardian3Pk),
@@ -154,7 +154,7 @@ contract AegisFullSystemTest is Test {
         );
 
         address[] memory tokens = new address[](1);
-        tokens[0] = address(usdc);
+        tokens = address(usdc);
 
         hook = new AegisExecutionHook(
             address(registry),
@@ -176,7 +176,6 @@ contract AegisFullSystemTest is Test {
 
         _registerTestEnclaveSession();
     }
-
     function _registerTestEnclaveSession() internal {
         bytes memory pubValues = abi.encode(
             enclaveSigner,
@@ -202,7 +201,7 @@ contract AegisFullSystemTest is Test {
     ) internal view returns (bytes memory hookEnvelope) {
         bytes32 mode = bytes32(0);
         uint256[] memory maxTokens = new uint256[](1);
-        maxTokens[0] = maxUsdcOutflow;
+        maxTokens = maxUsdcOutflow;
 
         bytes32 coreHash = keccak256(
             abi.encode(mode, executionCalldata, validUntilBlock, uint256(0), maxTokens, spendersZero)
@@ -228,8 +227,10 @@ contract AegisFullSystemTest is Test {
 
     function testGuardedTransferAndAntiReplayNonce() public {
         vm.deal(owner, 1 ether);
+        address predicted = factory.getAddress(owner, keccak256("salt1"));
         vm.prank(owner);
         address acct = factory.createProtectedAccount{value: 0.001 ether}(owner, keccak256("salt1"));
+        assertEq(acct, predicted);
         usdc.mint(acct, 1_000e6);
 
         address recipient = address(0xCAFE);
@@ -244,7 +245,6 @@ contract AegisFullSystemTest is Test {
         assertEq(usdc.balanceOf(recipient), 250e6);
         assertEq(AegisProtectedSmartAccount(payable(acct)).nonce(), 1);
 
-        // Immediate replay 1 block later MUST revert due to nonce increment
         vm.prank(owner);
         vm.expectRevert(AegisExecutionHook.AegisInvalidEnclaveSignature.selector);
         AegisProtectedSmartAccount(payable(acct)).executeGuarded(env, address(usdc), 0, callData);
@@ -264,7 +264,6 @@ contract AegisFullSystemTest is Test {
         address[] memory spenders = new address[](0);
         bytes memory env = _signEnvelope(acct, 0, signedExecData, block.number + 20, 250e6, spenders);
 
-        // Attacker attempts to swap recipient to attackerRecipient while reusing valid envelope
         bytes memory spoofedCallData = abi.encodeWithSelector(TestERC20.transfer.selector, attackerRecipient, 250e6);
 
         vm.prank(owner);
@@ -289,7 +288,7 @@ contract AegisFullSystemTest is Test {
         );
         bytes memory execData = abi.encodePacked(address(router), uint256(0), routerCall);
         address[] memory spenders = new address[](1);
-        spenders[0] = address(router);
+        spenders = address(router);
 
         bytes memory env = _signEnvelope(acct, 0, execData, block.number + 20, 400e6, spenders);
 
@@ -307,7 +306,39 @@ contract AegisFullSystemTest is Test {
         assertEq(usdc.allowance(acct, address(router)), 0);
     }
 
-    // Halmos Symbolic Invariant: Outflow exceeding enclave-signed cap ALWAYS reverts across all 2^256 amounts
+    function testHardenedAccessControlsAndGovernanceQuorum() public {
+        // 1. Unauthenticated postCheck on AegisExecutionHook must revert
+        vm.expectRevert(AegisExecutionHook.AegisUnauthorizedAccount.selector);
+        hook.postCheck(hex"1234");
+
+        // 2. Unauthenticated fileClaim on AegisUnderwritingVault must revert
+        vm.expectRevert(AegisUnderwritingVault.AegisUnauthorized.selector);
+        vault.fileClaim(1, address(0x1111), address(0x2222), 100e6);
+
+        // 3. 1-of-5 rogue guardian cannot unilaterally cancel a queued action (requires 3-of-5)
+        vm.prank(vm.addr(guardian1Pk));
+        uint256 actionId = council.queueAction(address(council), 0, abi.encodeCall(AegisSecurityCouncil.unpauseProtocol, ()));
+        vm.prank(vm.addr(guardian2Pk));
+        council.cancelAction(actionId);
+        (, , , , , uint256 cancelCount, , bool cancelled) = council.actions(actionId);
+        assertEq(cancelCount, 1);
+        assertFalse(cancelled);
+
+        // 4. PCR0 rotation preserves 24h overlap window for existing active session
+        vm.prank(address(council));
+        registry.updateApprovedPCR0(keccak256("NEW_PCR0_HIGH"), bytes16(keccak256("NEW_PCR0_LOW")));
+        assertTrue(registry.isValidEnclaveSigner(enclaveSigner));
+
+        // 5. 3-of-5 immediate revocation revokes compromised session without 48h timelock
+        vm.prank(vm.addr(guardian1Pk));
+        council.approveImmediateSessionRevocation(address(registry), enclaveSigner, "Key leak test");
+        vm.prank(vm.addr(guardian2Pk));
+        council.approveImmediateSessionRevocation(address(registry), enclaveSigner, "Key leak test");
+        vm.prank(vm.addr(guardian3Pk));
+        council.approveImmediateSessionRevocation(address(registry), enclaveSigner, "Key leak test");
+        assertFalse(registry.isValidEnclaveSigner(enclaveSigner));
+    }
+
     function check_outflowConservationSymbolic(uint256 signedCap, uint256 attemptedTransfer) public {
         vm.assume(signedCap < 1_000_000e6);
         vm.assume(attemptedTransfer > signedCap && attemptedTransfer <= 1_000_000e6);

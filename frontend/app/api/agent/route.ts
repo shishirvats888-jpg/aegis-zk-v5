@@ -5,6 +5,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const prompt = String(body?.prompt ?? '').trim();
     const smartAccount = String(body?.smartAccount ?? '').trim();
+    const userOpHash = typeof body?.userOpHash === 'string' ? body.userOpHash.trim() : undefined;
 
     if (!prompt) {
       return NextResponse.json({ error: 'Prompt is required' }, { status: 400 });
@@ -21,10 +22,21 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (process.env.REDTEAM_ACCESS_CODE) {
+      headers['x-aegis-access-code'] = process.env.REDTEAM_ACCESS_CODE;
+    }
+
     const teeRes = await fetch(`${enclaveUrl.replace(/\/$/, '')}/evaluate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, smartAccount }),
+      headers,
+      body: JSON.stringify({
+        prompt,
+        smartAccount,
+        userOpHash,
+        accessCode: process.env.REDTEAM_ACCESS_CODE || undefined,
+      }),
+      signal: AbortSignal.timeout(25_000),
     });
 
     const teeJson = await teeRes.json();

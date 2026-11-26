@@ -1,4 +1,4 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK (v5.2 Zero-Trust Full SHA-384 Edition)
+// Created & Architected by Shishir Vats | AEGIS-ZK (v5.3 Hardened Full SHA-384 Edition)
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
@@ -12,16 +12,21 @@ interface ISecurityCouncil {
 
 contract AegisSessionRegistry {
     string public constant PROTOCOL_AUTHOR = "Shishir Vats";
-    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
+    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.3-SHISHIR-VATS";
 
-    ISP1Verifier public immutable sp1Verifier;
-    bytes32 public immutable nitroVerifierVKey;
+    ISP1Verifier public sp1Verifier;
+    bytes32 public nitroVerifierVKey;
     address public immutable governanceTimelock;
     ISecurityCouncil public immutable securityCouncil;
 
     bytes32 public latestApprovedPCR0High;
     bytes16 public latestApprovedPCR0Low;
+    bytes32 public previousApprovedPCR0High;
+    bytes16 public previousApprovedPCR0Low;
+    uint256 public previousPCR0ValidUntil;
+
     uint256 public constant SESSION_TTL = 24 hours;
+    uint256 public constant PCR0_ROTATION_OVERLAP = 24 hours;
     uint256 public constant MAX_ATTESTATION_AGE = 10 minutes;
 
     struct EnclaveSession {
@@ -45,10 +50,19 @@ contract AegisSessionRegistry {
         uint64 expiresAt
     );
     event EnclaveSessionRevoked(address indexed enclaveSigner, bytes32 indexed certSerial, string reason);
-    event ApprovedPCR0Updated(bytes32 oldPCR0High, bytes16 oldPCR0Low, bytes32 newPCR0High, bytes16 newPCR0Low);
+    event ApprovedPCR0Updated(
+        bytes32 oldPCR0High,
+        bytes16 oldPCR0Low,
+        bytes32 newPCR0High,
+        bytes16 newPCR0Low,
+        uint256 overlapValidUntil
+    );
+    event VerifierConfigUpdated(address indexed newSp1Verifier, bytes32 indexed newNitroVKey);
 
     error AegisProtocolPaused();
     error AegisUnauthorized();
+    error AegisZeroAddress();
+    error AegisSessionNotFound(address signer);
     error AegisInvalidPCR0(bytes32 providedHigh, bytes16 providedLow, bytes32 expectedHigh, bytes16 expectedLow);
     error AegisZeroPCR0Forbidden();
     error AegisInvalidChainOrRegistryBinding(uint256 providedChainId, address providedRegistry);
@@ -75,7 +89,8 @@ contract AegisSessionRegistry {
         address _governanceTimelock,
         address _securityCouncil
     ) {
-        if (_initialApprovedPCR0High == bytes32(0) && _initialApprovedPCR0Low == bytes16(0)) {
+        if (_sp1Verifier == address(0) || _governanceTimelock == address(0)) revert AegisZeroAddress();
+        if (_nitroVerifierVKey == bytes32(0) || (_initialApprovedPCR0High == bytes32(0) && _initialApprovedPCR0Low == bytes16(0))) {
             revert AegisZeroPCR0Forbidden();
         }
         sp1Verifier = ISP1Verifier(_sp1Verifier);
@@ -104,6 +119,7 @@ contract AegisSessionRegistry {
             (address, bytes32, bytes16, bytes32, uint64, uint64, uint64, uint256, address)
         );
 
+        if (pubKeyEnclave == address(0)) revert AegisZeroAddress();
         if (boundChainId != block.chainid || boundRegistry != address(this)) {
             revert AegisInvalidChainOrRegistryBinding(boundChainId, boundRegistry);
         }
@@ -117,7 +133,10 @@ contract AegisSessionRegistry {
             revert AegisInvalidPCR0(pcr0High, pcr0Low, latestApprovedPCR0High, latestApprovedPCR0Low);
         }
         if (usedCertSerials[certSerial] || revokedCertSerials[certSerial]) revert AegisCertSerialReplayOrRevoked(certSerial);
-        if (attestationTimestamp > block.timestamp + 60 || (block.timestamp > attestationTimestamp && block.timestamp - attestationTimestamp > MAX_ATTESTATION_AGE)) {
+        if (
+            attestationTimestamp > block.timestamp + 60 ||
+            (block.timestamp > attestationTimestamp && block.timestamp - attestationTimestamp > MAX_ATTESTATION_AGE)
+        ) {
             revert AegisStaleAttestation(attestationTimestamp, block.timestamp);
         }
         if (block.timestamp < minCertNotBefore || block.timestamp > maxCertNotAfter) {
@@ -135,7 +154,9 @@ contract AegisSessionRegistry {
     }
 
     function emergencyRevokeSession(address enclaveSigner, string calldata reason) external onlyGovernance {
+        if (enclaveSigner == address(0)) revert AegisZeroAddress();
         EnclaveSession storage s = sessions[enclaveSigner];
+        if (s.registeredAt == 0) revert AegisSessionNotFound(enclaveSigner);
         s.revoked = true;
         revokedCertSerials[s.certSerial] = true;
         emit EnclaveSessionRevoked(enclaveSigner, s.certSerial, reason);
@@ -145,22 +166,40 @@ contract AegisSessionRegistry {
         if (newPCR0High == bytes32(0) && newPCR0Low == bytes16(0)) revert AegisZeroPCR0Forbidden();
         bytes32 oldHigh = latestApprovedPCR0High;
         bytes16 oldLow = latestApprovedPCR0Low;
+        previousApprovedPCR0High = oldHigh;
+        previousApprovedPCR0Low = oldLow;
+        previousPCR0ValidUntil = block.timestamp + PCR0_ROTATION_OVERLAP;
         latestApprovedPCR0High = newPCR0High;
         latestApprovedPCR0Low = newPCR0Low;
-        emit ApprovedPCR0Updated(oldHigh, oldLow, newPCR0High, newPCR0Low);
+        emit ApprovedPCR0Updated(oldHigh, oldLow, newPCR0High, newPCR0Low, previousPCR0ValidUntil);
+    }
+
+    function updateVerifierConfig(address newSp1Verifier, bytes32 newNitroVKey) external onlyGovernance {
+        if (newSp1Verifier == address(0)) revert AegisZeroAddress();
+        if (newNitroVKey == bytes32(0)) revert AegisZeroPCR0Forbidden();
+        sp1Verifier = ISP1Verifier(newSp1Verifier);
+        nitroVerifierVKey = newNitroVKey;
+        emit VerifierConfigUpdated(newSp1Verifier, newNitroVKey);
     }
 
     function isValidEnclaveSigner(address signer) external view returns (bool) {
         if (address(securityCouncil) != address(0) && securityCouncil.globalPaused()) return false;
         EnclaveSession memory s = sessions[signer];
-        return (
-            s.registeredAt > 0 &&
-            !s.revoked &&
-            !revokedCertSerials[s.certSerial] &&
-            block.timestamp <= s.expiresAt &&
-            (s.pcr0High != bytes32(0) || s.pcr0Low != bytes16(0)) &&
-            s.pcr0High == latestApprovedPCR0High &&
-            s.pcr0Low == latestApprovedPCR0Low
+        if (
+            s.registeredAt == 0 ||
+            s.revoked ||
+            revokedCertSerials[s.certSerial] ||
+            block.timestamp > s.expiresAt ||
+            (s.pcr0High == bytes32(0) && s.pcr0Low == bytes16(0))
+        ) {
+            return false;
+        }
+        bool matchesLatest = (s.pcr0High == latestApprovedPCR0High && s.pcr0Low == latestApprovedPCR0Low);
+        bool matchesGracePrevious = (
+            block.timestamp <= previousPCR0ValidUntil &&
+            s.pcr0High == previousApprovedPCR0High &&
+            s.pcr0Low == previousApprovedPCR0Low
         );
+        return matchesLatest || matchesGracePrevious;
     }
 }

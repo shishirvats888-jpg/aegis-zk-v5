@@ -1,4 +1,4 @@
-// Created & Architected by Shishir Vats | AEGIS-ZK (v5.2 Zero-Trust ERC-4337 / ERC-7579 Edition)
+// Created & Architected by Shishir Vats | AEGIS-ZK (v5.3 Hardened ERC-4337 / ERC-7579 Edition)
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
@@ -16,6 +16,10 @@ interface IAegisHookModule {
     ) external view returns (bool);
 }
 
+interface IAegisHookBinder {
+    function setAccountFactory(address _factory) external;
+}
+
 interface IERC20Account {
     function allowance(address owner, address spender) external view returns (uint256);
     function approve(address spender, uint256 amount) external returns (bool);
@@ -23,7 +27,7 @@ interface IERC20Account {
 
 contract AegisProtectedSmartAccount {
     string public constant PROTOCOL_AUTHOR = "Shishir Vats";
-    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
+    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.3-SHISHIR-VATS";
 
     address public immutable owner;
     IAegisHookModule public immutable aegisHook;
@@ -32,6 +36,7 @@ contract AegisProtectedSmartAccount {
 
     bytes1 internal constant CALLTYPE_SINGLE = 0x00;
     bytes1 internal constant CALLTYPE_BATCH = 0x01;
+    bytes1 internal constant EXECTYPE_DEFAULT = 0x00;
 
     struct Execution {
         address target;
@@ -44,6 +49,8 @@ contract AegisProtectedSmartAccount {
     error AegisInvalidOwnerSignature();
     error AegisApproveFailed();
     error AegisUnsupportedCallType(bytes1 callType);
+    error AegisInvalidRouterTarget();
+    error AegisModuleMutationDisabled();
 
     constructor(address _owner, address _aegisHook, address _entryPoint) {
         owner = _owner;
@@ -54,9 +61,30 @@ contract AegisProtectedSmartAccount {
 
     receive() external payable {}
 
+    function accountId() external pure returns (string memory) {
+        return "aegis-zk.smart-account.v5.3";
+    }
+
     function supportsModule(uint256 moduleTypeId) external pure returns (bool) {
-        // ERC-7579 Module Type 1 (Validator) & Module Type 4 (Hook)
         return moduleTypeId == 1 || moduleTypeId == 4;
+    }
+
+    function supportsExecutionMode(bytes32 mode) external pure returns (bool) {
+        bytes1 callType = bytes1(mode);
+        bytes1 execType = bytes1(mode << 8);
+        return (callType == CALLTYPE_SINGLE || callType == CALLTYPE_BATCH) && execType == EXECTYPE_DEFAULT;
+    }
+
+    function installModule(uint256, address, bytes calldata) external pure {
+        revert AegisModuleMutationDisabled();
+    }
+
+    function uninstallModule(uint256, address, bytes calldata) external pure {
+        revert AegisModuleMutationDisabled();
+    }
+
+    function executeFromExecutor(bytes32, bytes calldata) external pure returns (bytes[] memory) {
+        revert AegisModuleMutationDisabled();
     }
 
     function validateUserOp(
@@ -82,9 +110,9 @@ contract AegisProtectedSmartAccount {
             (bool ok, ) = payable(entryPoint).call{value: missingAccountFunds}("");
             require(ok, "Aegis: prefund transfer failed");
         }
-        return 0;
+        uint48 validUntilTs = validUntilBlock > type(uint48).max ? type(uint48).max : uint48(validUntilBlock);
+        return uint256(validUntilTs) << 160;
     }
-
     // Canonical ERC-7579 execute(bytes32 mode, bytes calldata executionCalldata) entrypoint
     function execute(bytes32 mode, bytes calldata executionCalldata) external payable returns (bytes[] memory results) {
         if (msg.sender != owner && msg.sender != entryPoint) revert AegisOnlyOwnerOrEntryPoint();
@@ -118,7 +146,7 @@ contract AegisProtectedSmartAccount {
                 if (!ok) {
                     assembly { revert(add(ret, 32), mload(ret)) }
                 }
-                results[0] = ret;
+                results = ret;
             }
         } else if (callType == CALLTYPE_BATCH) {
             Execution[] memory execs = abi.decode(innerExecutionData, (Execution[]));
@@ -172,6 +200,12 @@ contract AegisProtectedSmartAccount {
         bytes calldata routerCalldata
     ) external returns (bytes memory result) {
         if (msg.sender != owner && msg.sender != entryPoint) revert AegisOnlyOwnerOrEntryPoint();
+        if (targetRouter == address(0) || targetRouter == address(this) || targetRouter == token) {
+            revert AegisInvalidRouterTarget();
+        }
+        bytes32 envelopeMode = abi.decode(hookEnvelope, (bytes32));
+        if (bytes1(envelopeMode) != CALLTYPE_SINGLE) revert AegisUnsupportedCallType(bytes1(envelopeMode));
+
         bytes32 actualPackedCallHash = keccak256(abi.encodePacked(targetRouter, uint256(0), routerCalldata));
         bytes memory hookData = aegisHook.preCheck(
             msg.sender,
@@ -202,13 +236,17 @@ contract AegisProtectedSmartAccount {
 
     function _recoverOwner(bytes32 digest, bytes memory sig) internal pure returns (address) {
         if (sig.length != 65) revert AegisInvalidOwnerSignature();
-        bytes32 r; bytes32 s; uint8 v;
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
         assembly {
             r := mload(add(sig, 32))
             s := mload(add(sig, 64))
             v := byte(0, mload(add(sig, 96)))
         }
-        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) revert AegisInvalidOwnerSignature();
+        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
+            revert AegisInvalidOwnerSignature();
+        }
         if (v < 27) v += 27;
         if (v != 27 && v != 28) revert AegisInvalidOwnerSignature();
         address signer = ecrecover(digest, v, r, s);
@@ -219,7 +257,7 @@ contract AegisProtectedSmartAccount {
 
 contract AegisAccountFactory {
     string public constant PROTOCOL_AUTHOR = "Shishir Vats";
-    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.2-SHISHIR-VATS";
+    string public constant PROTOCOL_VERSION = "AEGIS-ZK-v5.3-SHISHIR-VATS";
 
     address public immutable aegisHook;
     address public immutable entryPoint;
@@ -243,13 +281,30 @@ contract AegisAccountFactory {
         _;
     }
 
-    constructor(address _aegisHook, address _entryPoint, address _governanceTimelock, address _feeTreasury, uint256 _onboardingFeeWei) {
+    constructor(
+        address _aegisHook,
+        address _entryPoint,
+        address _governanceTimelock,
+        address _feeTreasury,
+        uint256 _onboardingFeeWei
+    ) {
         if (_aegisHook == address(0) || _entryPoint == address(0) || _feeTreasury == address(0)) revert AegisZeroAddress();
         aegisHook = _aegisHook;
         entryPoint = _entryPoint;
         governanceTimelock = _governanceTimelock;
         feeTreasury = _feeTreasury;
         onboardingFeeWei = _onboardingFeeWei;
+        IAegisHookBinder(_aegisHook).setAccountFactory(address(this));
+    }
+
+    function getAddress(address owner, bytes32 salt) public view returns (address) {
+        bytes32 finalSalt = keccak256(abi.encode(owner, salt));
+        bytes memory creationCode = abi.encodePacked(
+            type(AegisProtectedSmartAccount).creationCode,
+            abi.encode(owner, aegisHook, entryPoint)
+        );
+        bytes32 hash = keccak256(abi.encodePacked(bytes1(0xff), address(this), finalSalt, keccak256(creationCode)));
+        return address(uint160(uint256(hash)));
     }
 
     function createProtectedAccount(address owner, bytes32 salt) external payable returns (address account) {
